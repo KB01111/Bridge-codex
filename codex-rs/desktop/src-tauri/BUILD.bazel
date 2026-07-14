@@ -1,0 +1,25 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+codex_rust_crate(
+    name = "desktop",
+    build_script_data = [
+        "Cargo.toml",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/32x32.png",
+        "icons/icon.icns",
+        "icons/icon.ico",
+        "icons/icon.png",
+        "tauri.conf.json",
+    ],
+    build_script_env = {
+        "CODEX_BAZEL_CLANG": "$(execpath @llvm//tools:clang)",
+        "CODEX_BAZEL_WINDRES": "$(execpath @llvm//tools:llvm-windres)",
+        "DEP_TAURI_DEV": "true",
+    },
+    build_script_tools = [
+        "@llvm//tools:clang",
+        "@llvm//tools:llvm-windres",
+    ],
+    crate_name = "codex_desktop",
+)

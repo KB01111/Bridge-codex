@@ -112,9 +112,9 @@ filenames instead.
 
 DotSlash resolves the package entrypoint to `argument-comment-lint/bin/argument-comment-lint`
 (or `.exe` on Windows). That runner finds the sibling bundled `cargo-dylint`
-binary and the single packaged Dylint library under `lib/`, normalizes the
-host-qualified nightly filename to the plain `nightly-2025-09-18` channel when
-needed, and then invokes `cargo-dylint dylint --lib-path <that-library>` with
+binary and the single packaged Dylint library under `lib/`, preserves its
+host-qualified nightly filename so Dylint can resolve the installed toolchain,
+and then invokes `cargo-dylint dylint --lib-path <that-library>` with
 the repo's default `DYLINT_RUSTFLAGS` and `CARGO_INCREMENTAL=0` settings.
 
 The checked-in `run-prebuilt-linter.py` wrapper uses the fetched package

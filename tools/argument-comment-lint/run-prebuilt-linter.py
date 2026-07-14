@@ -10,10 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wrapper_common import (
     build_final_args,
+    configure_windows_toolchain_env,
     exec_command,
     fetch_packaged_entrypoint,
     find_packaged_cargo_dylint,
-    normalize_packaged_library,
+    find_packaged_library,
     parse_wrapper_args,
     prefer_rustup_shims,
     repo_root,
@@ -28,6 +29,7 @@ def main() -> "Never":
 
     env = os.environ.copy()
     prefer_rustup_shims(env)
+    configure_windows_toolchain_env(env)
     set_default_lint_env(env)
 
     package_entrypoint = fetch_packaged_entrypoint(
@@ -35,7 +37,7 @@ def main() -> "Never":
         env,
     )
     cargo_dylint = find_packaged_cargo_dylint(package_entrypoint)
-    library_path = normalize_packaged_library(package_entrypoint)
+    library_path = find_packaged_library(package_entrypoint)
 
     command = [str(cargo_dylint), "dylint", "--lib-path", str(library_path)]
     if not parsed.has_library_selection:

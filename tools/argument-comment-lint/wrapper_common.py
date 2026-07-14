@@ -5,12 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from typing import MutableMapping, Sequence
 
 STRICT_LINTS = [
@@ -31,11 +29,6 @@ _TARGET_SELECTION_ARGS = {
 }
 _TARGET_SELECTION_PREFIXES = ("--bin=", "--test=", "--example=", "--bench=")
 _TARGET_SELECTION_WITH_VALUE = {"--bin", "--test", "--example", "--bench"}
-_NIGHTLY_LIBRARY_PATTERN = re.compile(
-    r"^(.+@nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})-.+$"
-)
-
-
 @dataclass
 class ParsedWrapperArgs:
     lint_args: list[str]
@@ -230,6 +223,30 @@ def prefer_rustup_shims(env: MutableMapping[str, str]) -> None:
             env["RUSTUP_HOME"] = rustup_home
 
 
+def configure_windows_toolchain_env(env: MutableMapping[str, str]) -> None:
+    if sys.platform != "win32":
+        return
+
+    rustc = run_capture(
+        ["rustup", "which", "rustc", "--toolchain", TOOLCHAIN_CHANNEL],
+        env=env,
+    )
+    toolchain_bin_path = Path(rustc).resolve().parent
+    toolchain_root = toolchain_bin_path.parent
+    rustup_home = toolchain_root.parent.parent
+    toolchain_bin = str(toolchain_bin_path)
+    normalized_toolchain_bin = os.path.normcase(os.path.normpath(toolchain_bin))
+    path_entries = [
+        entry
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if entry
+        and os.path.normcase(os.path.normpath(entry)) != normalized_toolchain_bin
+    ]
+    env["PATH"] = os.pathsep.join([toolchain_bin, *path_entries])
+    env["RUSTUP_HOME"] = str(rustup_home)
+    env["RUSTUP_TOOLCHAIN"] = toolchain_root.name
+
+
 def fetch_packaged_entrypoint(dotslash_manifest: Path, env: MutableMapping[str, str]) -> Path:
     require_command(
         "dotslash",
@@ -251,23 +268,14 @@ def find_packaged_cargo_dylint(package_entrypoint: Path) -> Path:
     return cargo_dylint
 
 
-def normalize_packaged_library(package_entrypoint: Path) -> Path:
+def find_packaged_library(package_entrypoint: Path) -> Path:
     library_dir = package_entrypoint.parent.parent / "lib"
     libraries = sorted(path for path in library_dir.glob("*@*") if path.is_file())
     if not libraries:
         die(f"no packaged Dylint library found in {library_dir}")
     if len(libraries) != 1:
         die(f"expected exactly one packaged Dylint library in {library_dir}")
-
-    library_path = libraries[0]
-    match = _NIGHTLY_LIBRARY_PATTERN.match(library_path.stem)
-    if match is None:
-        return library_path
-
-    temp_dir = Path(tempfile.mkdtemp(prefix="argument-comment-lint."))
-    normalized_library_path = temp_dir / f"{match.group(1)}{library_path.suffix}"
-    shutil.copy2(library_path, normalized_library_path)
-    return normalized_library_path
+    return libraries[0]
 
 
 def exec_command(command: Sequence[str], env: MutableMapping[str, str]) -> "Never":

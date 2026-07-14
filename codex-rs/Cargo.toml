@@ -20,6 +20,7 @@ members = [
     "features",
     "install-context",
     "codex-backend-openapi-models",
+    "code-memory",
     "code-mode",
     "code-mode-host",
     "code-mode-protocol",
@@ -33,6 +34,7 @@ members = [
     "connectors",
     "config",
     "context-fragments",
+    "desktop/src-tauri",
     "shell-command",
     "shell-escalation",
     "skills",
@@ -163,6 +165,7 @@ codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
 codex-cloud-config = { path = "cloud-config" }
 codex-cloud-tasks-client = { path = "cloud-tasks-client" }
 codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
+codex-code-memory = { path = "code-memory" }
 codex-code-mode = { path = "code-mode" }
 codex-code-mode-protocol = { path = "code-mode-protocol" }
 codex-home = { path = "codex-home" }
@@ -284,6 +287,7 @@ bm25 = "2.3.2"
 bytes = "1.10.1"
 chardetng = "0.1.17"
 chrono = "0.4.43"
+chromiumoxide = "0.9.1"
 clap = "4"
 clap_complete = "4"
 clatter = { version = "2.2.0", default-features = false, features = [
@@ -310,6 +314,7 @@ dns-lookup = "3.0.1"
 dotenvy = "0.15.7"
 dunce = "1.0.4"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
+enigo = "0.6.1"
 encoding_rs = "0.8.35"
 eventsource-stream = "0.2.3"
 flate2 = "1.1.8"
@@ -416,6 +421,8 @@ supports-color = "3.0.2"
 syntect = "5"
 sys-locale = "0.3.2"
 system-configuration = "0.7"
+tauri = "2.11"
+tauri-build = "2.6"
 tar = { version = "=0.4.45", default-features = false }
 tempfile = "3.23.0"
 test-log = "0.2.19"
@@ -434,6 +441,7 @@ tokio-tungstenite = { version = "0.28.0", features = [
 tokio-util = "0.7.18"
 toml = "0.9.5"
 toml_edit = "0.24.0"
+tower = "0.5"
 tracing = "0.1.44"
 tracing-appender = "0.2.3"
 tracing-opentelemetry = "0.32.0"
@@ -443,6 +451,14 @@ tonic = { version = "0.14.3", default-features = false, features = ["channel", "
 tonic-prost = "0.14.3"
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-swift = "0.7.3"
+tree-sitter-typescript = "0.23.2"
 ts-rs = "11"
 tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 uds_windows = "1.1.0"

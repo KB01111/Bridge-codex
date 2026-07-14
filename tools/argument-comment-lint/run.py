@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wrapper_common import (
     build_final_args,
+    configure_windows_toolchain_env,
     ensure_source_prerequisites,
     exec_command,
     parse_wrapper_args,
@@ -25,6 +26,7 @@ def main() -> "Never":
 
     env = os.environ.copy()
     ensure_source_prerequisites(env)
+    configure_windows_toolchain_env(env)
     set_default_lint_env(env)
 
     command = ["cargo", "dylint", "--path", str(root / "tools" / "argument-comment-lint")]
