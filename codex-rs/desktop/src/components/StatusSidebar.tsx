@@ -116,8 +116,9 @@ export function StatusSidebar({
   const latestChatContent = chat.at(-1)?.content;
   const modelSelected = Boolean(selectedModel);
   const firstPrompt = chat.find((message) => message.role === "user")?.content;
-  const title = firstPrompt
-    ? `${firstPrompt.trim().split(/\s+/).slice(0, 8).join(" ")}${firstPrompt.trim().split(/\s+/).length > 8 ? "…" : ""}`
+  const promptWords = firstPrompt ? firstPrompt.trim().split(/\\s+/) : [];
+  const title = promptWords.length > 0
+    ? `${promptWords.slice(0, 8).join(" ")}${promptWords.length > 8 ? "…" : ""}`
     : "New task";
 
   useEffect(() => {
