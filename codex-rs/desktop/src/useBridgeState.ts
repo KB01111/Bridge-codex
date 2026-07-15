@@ -223,8 +223,7 @@ function conversationTitle(chat: UiChatMessage[]): string {
   if (!firstPrompt?.trim()) {
     return "New task";
   }
-  const cleaned = firstPrompt.slice(0, 100).trim().replace(/\\s+/gu, " ");
-  return cleaned.length > 52 ? `${cleaned.slice(0, 51)}…` : cleaned;
+  const cleaned = firstPrompt.slice(0, 100).trim().replace(/\s+/gu, " ");
 }
 
 function parseTrace(value: unknown): TraceEntry[] {
