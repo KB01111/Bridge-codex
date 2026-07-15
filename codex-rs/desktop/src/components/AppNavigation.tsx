@@ -141,7 +141,7 @@ function ToolButton({
   onSelect: (tool: ToolView) => void;
 }) {
   const Icon = item.icon;
-  const countLabel = count === undefined ? null : count > 99 ? "99+" : count;
+  const countLabel = !count ? null : count > 99 ? "99+" : count;
   const accessibleLabel =
     count === undefined ? item.label : `${item.label}, ${count} total`;
 
