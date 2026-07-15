@@ -164,56 +164,63 @@ export function DesktopWorkspace({
         )}
       </div>
 
-      <div className="desktop-tools">
-        <form onSubmit={submitClick}>
-          <fieldset disabled={!enabled || busy}>
-            <legend>Absolute pointer click</legend>
-            <label htmlFor="desktop-coordinate-x">X coordinate</label>
-            <input
-              id="desktop-coordinate-x"
-              type="number"
-              min={0}
-              max={displayWidth ? displayWidth - 1 : undefined}
-              step={1}
-              value={coordinateX}
-              onChange={(event) => setCoordinateX(event.currentTarget.value)}
-            />
-            <label htmlFor="desktop-coordinate-y">Y coordinate</label>
-            <input
-              id="desktop-coordinate-y"
-              type="number"
-              min={0}
-              max={displayHeight ? displayHeight - 1 : undefined}
-              step={1}
-              value={coordinateY}
-              onChange={(event) => setCoordinateY(event.currentTarget.value)}
-            />
-            <button
-              type="submit"
-              disabled={coordinateX === "" || coordinateY === ""}
-            >
-              Click desktop
-            </button>
-          </fieldset>
-        </form>
+      <details className="manual-tool-disclosure">
+        <summary>Manual desktop controls</summary>
+        <p>
+          Actions target the main display and the application that currently has
+          focus.
+        </p>
+        <div className="desktop-tools">
+          <form onSubmit={submitClick}>
+            <fieldset disabled={!enabled || busy}>
+              <legend>Absolute pointer click</legend>
+              <label htmlFor="desktop-coordinate-x">X coordinate</label>
+              <input
+                id="desktop-coordinate-x"
+                type="number"
+                min={0}
+                max={displayWidth ? displayWidth - 1 : undefined}
+                step={1}
+                value={coordinateX}
+                onChange={(event) => setCoordinateX(event.currentTarget.value)}
+              />
+              <label htmlFor="desktop-coordinate-y">Y coordinate</label>
+              <input
+                id="desktop-coordinate-y"
+                type="number"
+                min={0}
+                max={displayHeight ? displayHeight - 1 : undefined}
+                step={1}
+                value={coordinateY}
+                onChange={(event) => setCoordinateY(event.currentTarget.value)}
+              />
+              <button
+                type="submit"
+                disabled={coordinateX === "" || coordinateY === ""}
+              >
+                Click desktop
+              </button>
+            </fieldset>
+          </form>
 
-        <form onSubmit={submitText}>
-          <fieldset disabled={!enabled || busy}>
-            <legend>Native keyboard input</legend>
-            <label htmlFor="desktop-type-text">Text to type</label>
-            <textarea
-              id="desktop-type-text"
-              rows={4}
-              value={text}
-              onChange={(event) => setText(event.currentTarget.value)}
-              placeholder="Text is sent to the currently focused application"
-            />
-            <button type="submit" disabled={!text}>
-              Type on desktop
-            </button>
-          </fieldset>
-        </form>
-      </div>
+          <form onSubmit={submitText}>
+            <fieldset disabled={!enabled || busy}>
+              <legend>Native keyboard input</legend>
+              <label htmlFor="desktop-type-text">Text to type</label>
+              <textarea
+                id="desktop-type-text"
+                rows={4}
+                value={text}
+                onChange={(event) => setText(event.currentTarget.value)}
+                placeholder="Text is sent to the currently focused application"
+              />
+              <button type="submit" disabled={!text}>
+                Type on desktop
+              </button>
+            </fieldset>
+          </form>
+        </div>
+      </details>
     </section>
   );
 }

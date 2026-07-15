@@ -17,6 +17,8 @@ import { RoutingPanel } from "./RoutingPanel";
 import { TasksPanel } from "./TasksPanel";
 
 export type ControlPanelProps = {
+  activeTab: "routing" | "tasks" | "memory";
+  compact?: boolean;
   proxyStatus: ProxyStatus | null;
   a2aStatus: A2aStatus | null;
   a2aTasks: A2aTask[];
@@ -51,39 +53,41 @@ export type ControlPanelProps = {
   onSearchCodeMemory: (request: CodeMemorySearchRequest) => Promise<void>;
   onClearCodeMemory: () => Promise<void>;
   onClearCodeMemoryResults: () => void;
+  onActiveTabChange: (value: "routing" | "tasks" | "memory") => void;
 };
 
 export function ControlPanel(props: ControlPanelProps) {
   const busy = props.routingBusy || props.a2aBusy || props.codeMemoryBusy;
 
   return (
-    <aside
-      id="control-panel"
-      className="control-panel"
-      aria-label="Work mode controls"
-    >
-      <header>
-        <div>
-          <p className="eyebrow">Local orchestration</p>
-          <h2>Control panel</h2>
-        </div>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void props.onRefreshAll()}
-        >
-          {busy ? "Working…" : "Refresh all"}
-        </button>
-      </header>
+    <div id="control-panel" className="control-panel">
+      {!props.compact && (
+        <header>
+          <div>
+            <p className="eyebrow">Local orchestration</p>
+            <h2>Control panel</h2>
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void props.onRefreshAll()}
+          >
+            {busy ? "Working…" : "Refresh all"}
+          </button>
+        </header>
+      )}
 
       <Tabs.Root
         className="control-panel-tabs"
-        defaultValue="routing"
+        value={props.activeTab}
         onValueChange={(value) => {
           if (value === "tasks") {
             void props.onRefreshA2aTasks();
           } else if (value === "memory") {
             void props.onRefreshCodeMemory();
+          }
+          if (value === "routing" || value === "tasks" || value === "memory") {
+            props.onActiveTabChange(value);
           }
         }}
       >
@@ -153,6 +157,6 @@ export function ControlPanel(props: ControlPanelProps) {
           />
         </Tabs.Content>
       </Tabs.Root>
-    </aside>
+    </div>
   );
 }

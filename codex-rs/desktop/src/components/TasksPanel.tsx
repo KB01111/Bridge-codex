@@ -89,7 +89,9 @@ export function TasksPanel({
         <div className="section-heading-row">
           <div>
             <h3 id="delegate-heading">Delegate a task</h3>
-            <p>Queues work through the local A2A HTTP+JSON endpoint.</p>
+            <p>
+              Run focused work independently through the local task service.
+            </p>
           </div>
           <span data-state={status?.running ? "online" : "offline"}>
             {status === null

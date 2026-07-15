@@ -5,6 +5,7 @@ import { BrowserWorkspace } from "./BrowserWorkspace";
 import { DesktopWorkspace } from "./DesktopWorkspace";
 
 export type WorkspaceProps = {
+  activeTab: "browser" | "desktop";
   browserStatus: BrowserStatus | null;
   browserFrame: BrowserFrame | null;
   desktopStatus: DesktopStatus | null;
@@ -23,17 +24,21 @@ export type WorkspaceProps = {
   onDisableDesktop: () => Promise<void>;
   onDesktopClickAt: (x: number, y: number) => Promise<void>;
   onDesktopType: (text: string) => Promise<void>;
+  onActiveTabChange: (value: "browser" | "desktop") => void;
 };
 
 export function Workspace(props: WorkspaceProps) {
   return (
-    <main id="work-surfaces" className="workspace" aria-label="Work surfaces">
+    <div id="work-surfaces" className="workspace">
       <Tabs.Root
         className="workspace-tabs"
-        defaultValue="browser"
+        value={props.activeTab}
         onValueChange={(value) => {
           if (value === "desktop") {
             void props.onRefreshDesktop();
+          }
+          if (value === "browser" || value === "desktop") {
+            props.onActiveTabChange(value);
           }
         }}
       >
@@ -68,6 +73,6 @@ export function Workspace(props: WorkspaceProps) {
           />
         </Tabs.Content>
       </Tabs.Root>
-    </main>
+    </div>
   );
 }

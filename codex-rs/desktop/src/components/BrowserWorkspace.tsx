@@ -243,78 +243,85 @@ export function BrowserWorkspace({
         keyboard-accessible controls below.
       </p>
 
-      <div className="browser-tools">
-        <form className="selector-tools" onSubmit={submitSelectorClick}>
-          <label htmlFor="browser-selector">CSS selector</label>
-          <input
-            id="browser-selector"
-            value={selector}
-            onChange={(event) => setSelector(event.currentTarget.value)}
-            placeholder="#search or [aria-label='Search']"
-            spellCheck={false}
-            disabled={!browserRunning || busy}
-          />
-          <button
-            type="submit"
-            disabled={!browserRunning || busy || !selector.trim()}
-          >
-            Click element
-          </button>
-        </form>
-
-        <form className="browser-type-tools" onSubmit={submitTyping}>
-          <label htmlFor="browser-type-text">
-            Text to type into selected element
-          </label>
-          <textarea
-            id="browser-type-text"
-            value={browserText}
-            onChange={(event) => setBrowserText(event.currentTarget.value)}
-            rows={2}
-            disabled={!browserRunning || busy}
-          />
-          <button
-            type="submit"
-            disabled={
-              !browserRunning || busy || !selector.trim() || !browserText
-            }
-          >
-            Type text
-          </button>
-        </form>
-
-        <form className="coordinate-tools" onSubmit={submitCoordinateClick}>
-          <fieldset disabled={!browserRunning || busy}>
-            <legend>Viewport coordinate</legend>
-            <label htmlFor="browser-coordinate-x">X</label>
+      <details className="manual-tool-disclosure">
+        <summary>Manual browser controls</summary>
+        <p>
+          Use these controls when you need to target an exact element or
+          coordinate.
+        </p>
+        <div className="browser-tools">
+          <form className="selector-tools" onSubmit={submitSelectorClick}>
+            <label htmlFor="browser-selector">CSS selector</label>
             <input
-              id="browser-coordinate-x"
-              type="number"
-              min={0}
-              max={viewportWidth - 1}
-              step={1}
-              value={coordinateX}
-              onChange={(event) => setCoordinateX(event.currentTarget.value)}
-            />
-            <label htmlFor="browser-coordinate-y">Y</label>
-            <input
-              id="browser-coordinate-y"
-              type="number"
-              min={0}
-              max={viewportHeight - 1}
-              step={1}
-              value={coordinateY}
-              onChange={(event) => setCoordinateY(event.currentTarget.value)}
+              id="browser-selector"
+              value={selector}
+              onChange={(event) => setSelector(event.currentTarget.value)}
+              placeholder="#search or [aria-label='Search']"
+              spellCheck={false}
+              disabled={!browserRunning || busy}
             />
             <button
               type="submit"
-              disabled={coordinateX === "" || coordinateY === ""}
+              disabled={!browserRunning || busy || !selector.trim()}
             >
-              Click coordinate
+              Click element
             </button>
-          </fieldset>
-        </form>
-      </div>
+          </form>
+
+          <form className="browser-type-tools" onSubmit={submitTyping}>
+            <label htmlFor="browser-type-text">
+              Text to type into selected element
+            </label>
+            <textarea
+              id="browser-type-text"
+              value={browserText}
+              onChange={(event) => setBrowserText(event.currentTarget.value)}
+              rows={2}
+              disabled={!browserRunning || busy}
+            />
+            <button
+              type="submit"
+              disabled={
+                !browserRunning || busy || !selector.trim() || !browserText
+              }
+            >
+              Type text
+            </button>
+          </form>
+
+          <form className="coordinate-tools" onSubmit={submitCoordinateClick}>
+            <fieldset disabled={!browserRunning || busy}>
+              <legend>Viewport coordinate</legend>
+              <label htmlFor="browser-coordinate-x">X</label>
+              <input
+                id="browser-coordinate-x"
+                type="number"
+                min={0}
+                max={viewportWidth - 1}
+                step={1}
+                value={coordinateX}
+                onChange={(event) => setCoordinateX(event.currentTarget.value)}
+              />
+              <label htmlFor="browser-coordinate-y">Y</label>
+              <input
+                id="browser-coordinate-y"
+                type="number"
+                min={0}
+                max={viewportHeight - 1}
+                step={1}
+                value={coordinateY}
+                onChange={(event) => setCoordinateY(event.currentTarget.value)}
+              />
+              <button
+                type="submit"
+                disabled={coordinateX === "" || coordinateY === ""}
+              >
+                Click coordinate
+              </button>
+            </fieldset>
+          </form>
+        </div>
+      </details>
     </section>
   );
 }
