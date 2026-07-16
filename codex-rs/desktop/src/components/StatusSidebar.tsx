@@ -1,8 +1,20 @@
 import * as HoverCard from "@radix-ui/react-hover-card";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
 import {
+  Activity,
+  ArrowUp,
+  Check,
+  Copy,
+  RotateCcw,
+  Settings2,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
+import {
   type FormEvent,
   type KeyboardEvent,
+  lazy,
+  Suspense,
   useEffect,
   useRef,
   useState,
@@ -11,6 +23,11 @@ import {
 import type { A2aStatus, BrowserStatus, ProxyStatus } from "../types";
 import type { TraceEntry, UiChatMessage } from "../useBridgeState";
 
+const MessageContent = lazy(async () => {
+  const module = await import("./MessageContent");
+  return { default: module.MessageContent };
+});
+
 export type StatusSidebarProps = {
   proxyStatus: ProxyStatus | null;
   browserStatus: BrowserStatus | null;
@@ -18,11 +35,12 @@ export type StatusSidebarProps = {
   trace: TraceEntry[];
   chat: UiChatMessage[];
   sending: boolean;
-  modelSelected: boolean;
+  selectedModel: string;
   onSend: (prompt: string) => Promise<void>;
   onRetry: () => Promise<void>;
   onClearTrace: () => void;
   onClearChat: () => void;
+  onOpenRouting: () => void;
 };
 
 function StatusIndicator({
@@ -79,11 +97,12 @@ export function StatusSidebar({
   trace,
   chat,
   sending,
-  modelSelected,
+  selectedModel,
   onSend,
   onRetry,
   onClearTrace,
   onClearChat,
+  onOpenRouting,
 }: StatusSidebarProps) {
   const [prompt, setPrompt] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -95,6 +114,12 @@ export function StatusSidebar({
   const copyTimer = useRef<number | null>(null);
   const latestTraceMessage = trace.at(-1)?.message;
   const latestChatContent = chat.at(-1)?.content;
+  const modelSelected = Boolean(selectedModel);
+  const firstPrompt = chat.find((message) => message.role === "user")?.content;
+  const promptWords = firstPrompt ? firstPrompt.trim().split(/\\s+/) : [];
+  const title = promptWords.length > 0
+    ? `${promptWords.slice(0, 8).join(" ")}${promptWords.length > 8 ? "…" : ""}`
+    : "New task";
 
   useEffect(() => {
     if (tracePinned.current && traceViewport.current) {
@@ -129,7 +154,11 @@ export function StatusSidebar({
   }
 
   function promptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
@@ -158,112 +187,71 @@ export function StatusSidebar({
   }
 
   return (
-    <aside
+    <main
       id="agent-activity"
       className="status-sidebar"
-      aria-label="Agent activity"
+      aria-label="Current task"
     >
-      <header className="product-heading">
-        <p className="eyebrow">Work mode</p>
-        <h1>Bridge Codex</h1>
-      </header>
-
-      <section className="agent-status" aria-labelledby="agent-status-heading">
-        <h2 id="agent-status-heading">Agent status</h2>
-        <div className="status-list">
-          <StatusIndicator
-            label="Model router"
-            running={proxyStatus?.running ?? null}
-            detail={
-              proxyStatus?.running
-                ? "CLIProxyAPI is available on localhost:8317."
-                : (proxyStatus?.error ?? "Waiting for CLIProxyAPI status.")
-            }
-          />
-          <StatusIndicator
-            label="Agent browser"
-            running={browserStatus?.running ?? null}
-            detail={
-              browserStatus?.running
-                ? `Chromium viewport is ${browserStatus.viewportWidth} × ${browserStatus.viewportHeight}.`
-                : "The isolated browser starts only when requested."
-            }
-          />
-          <StatusIndicator
-            label="A2A endpoint"
-            running={a2aStatus?.running ?? null}
-            detail={
-              a2aStatus?.running
-                ? `Task delegation is available at ${a2aStatus.address}.`
-                : (a2aStatus?.error ?? "Waiting for the local A2A server.")
-            }
-          />
+      <header className="thread-header">
+        <div className="thread-heading">
+          <p className="eyebrow">Local conversation</p>
+          <h1>{title}</h1>
         </div>
-      </section>
-
-      <section className="execution-trace" aria-labelledby="trace-heading">
-        <div className="section-heading-row">
-          <div>
-            <h2 id="trace-heading">Execution trace</h2>
-            <span>{trace.length} events</span>
+        <div className="thread-header-actions">
+          <div className="status-list" aria-label="Local service status">
+            <StatusIndicator
+              label="Router"
+              running={proxyStatus?.running ?? null}
+              detail={
+                proxyStatus?.running
+                  ? "CLIProxyAPI is available on localhost:8317."
+                  : (proxyStatus?.error ?? "Waiting for CLIProxyAPI status.")
+              }
+            />
+            <StatusIndicator
+              label="Browser"
+              running={browserStatus?.running ?? null}
+              detail={
+                browserStatus?.running
+                  ? `Chromium viewport is ${browserStatus.viewportWidth} × ${browserStatus.viewportHeight}.`
+                  : "The isolated browser starts only when requested."
+              }
+            />
+            <StatusIndicator
+              label="A2A"
+              running={a2aStatus?.running ?? null}
+              detail={
+                a2aStatus?.running
+                  ? `Task delegation is available at ${a2aStatus.address}.`
+                  : (a2aStatus?.error ?? "Waiting for the local A2A server.")
+              }
+            />
           </div>
+          <span className="thread-action-divider" aria-hidden="true" />
           <button
+            className="icon-button"
             type="button"
-            disabled={trace.length === 0}
-            onClick={onClearTrace}
+            title="Retry the last prompt"
+            aria-label="Retry the last prompt"
+            disabled={sending || chat.length === 0}
+            onClick={() => void onRetry()}
           >
-            Clear trace
+            <RotateCcw aria-hidden="true" />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title="Clear this conversation"
+            aria-label="Clear this conversation"
+            disabled={sending || chat.length === 0}
+            onClick={onClearChat}
+          >
+            <Trash2 aria-hidden="true" />
           </button>
         </div>
-        <ScrollArea.Root className="trace-scroll-area" type="auto">
-          <ScrollArea.Viewport
-            ref={traceViewport}
-            className="trace-viewport"
-            onScroll={(event) => {
-              tracePinned.current = isNearBottom(event.currentTarget);
-            }}
-          >
-            <ol>
-              {trace.length === 0 ? (
-                <li className="empty-state">Waiting for agent activity.</li>
-              ) : (
-                trace.map((entry) => (
-                  <li key={entry.id} data-kind={entry.kind}>
-                    <time dateTime={entry.timestamp.toISOString()}>
-                      {formatTime(entry.timestamp)}
-                    </time>
-                    <span>{entry.message}</span>
-                  </li>
-                ))
-              )}
-            </ol>
-          </ScrollArea.Viewport>
-          <ScrollArea.Scrollbar orientation="vertical">
-            <ScrollArea.Thumb />
-          </ScrollArea.Scrollbar>
-        </ScrollArea.Root>
-      </section>
+      </header>
 
-      <section className="agent-chat" aria-labelledby="chat-heading">
-        <div className="section-heading-row">
-          <h2 id="chat-heading">Agent chat</h2>
-          <div className="chat-actions">
-            <button
-              type="button"
-              disabled={sending || chat.length === 0}
-              onClick={() => void onRetry()}
-            >
-              Retry last
-            </button>
-            <button
-              type="button"
-              disabled={sending || chat.length === 0}
-              onClick={onClearChat}
-            >
-              Clear chat
-            </button>
-          </div>
-        </div>
+      <section className="agent-chat" aria-label="Conversation">
         <ScrollArea.Root className="chat-scroll-area" type="auto">
           <ScrollArea.Viewport
             ref={chatViewport}
@@ -274,28 +262,80 @@ export function StatusSidebar({
           >
             <div className="chat-message-list">
               {chat.length === 0 ? (
-                <p className="empty-state">
-                  Send a task to the selected model.
-                </p>
+                <div className="thread-empty-state">
+                  <span className="bridge-mark" aria-hidden="true">
+                    B
+                  </span>
+                  <div>
+                    <h2>What are we building?</h2>
+                    <p>
+                      Start with a focused task. Bridge keeps the conversation
+                      and local agent activity together.
+                    </p>
+                  </div>
+                  <div className="prompt-suggestions" aria-label="Prompt ideas">
+                    <button
+                      type="button"
+                      onClick={() => setPrompt("Help me plan a coding task")}
+                    >
+                      Plan a coding task
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPrompt("Draft a safe implementation plan")
+                      }
+                    >
+                      Draft an implementation
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPrompt("Explain this code and its tradeoffs")
+                      }
+                    >
+                      Explain code
+                    </button>
+                  </div>
+                </div>
               ) : (
                 chat.map((message) => (
                   <article key={message.id} data-role={message.role}>
                     <header>
-                      <span>{message.role === "user" ? "You" : "Agent"}</span>
+                      <span>{message.role === "user" ? "You" : "Bridge"}</span>
                       {message.content && (
                         <button
+                          className="message-copy-button"
                           type="button"
+                          aria-label={`Copy ${message.role} message`}
                           onClick={() => void copyMessage(message)}
                         >
-                          {copiedMessageId === message.id ? "Copied" : "Copy"}
+                          {copiedMessageId === message.id ? (
+                            <Check aria-hidden="true" />
+                          ) : (
+                            <Copy aria-hidden="true" />
+                          )}
+                          <span>
+                            {copiedMessageId === message.id ? "Copied" : "Copy"}
+                          </span>
                         </button>
                       )}
                     </header>
                     {message.content && (
-                      <pre className="chat-content">{message.content}</pre>
+                      <Suspense
+                        fallback={
+                          <pre className="message-content message-fallback">
+                            {message.content}
+                          </pre>
+                        }
+                      >
+                        <MessageContent content={message.content} />
+                      </Suspense>
                     )}
                     {message.streaming && (
-                      <p role="status">Receiving response…</p>
+                      <p className="streaming-status" role="status">
+                        <Sparkles aria-hidden="true" /> Receiving response…
+                      </p>
                     )}
                     {message.validation?.containsCode && (
                       <div
@@ -335,32 +375,101 @@ export function StatusSidebar({
         {copyError && (
           <p role="alert">Could not copy the response: {copyError}</p>
         )}
-        <p className="chat-progress" role="status" aria-live="polite">
-          {sending ? "The selected model is working." : "Ready for a task."}
-        </p>
+      </section>
+
+      <footer className="thread-footer">
+        <details className="execution-trace">
+          <summary>
+            <span>
+              <Activity aria-hidden="true" /> Activity
+            </span>
+            <span>{trace.length} events</span>
+          </summary>
+          <div className="trace-panel">
+            <div className="trace-panel-header">
+              <p>Local service and execution events</p>
+              <button
+                type="button"
+                disabled={trace.length === 0}
+                onClick={onClearTrace}
+              >
+                Clear
+              </button>
+            </div>
+            <ScrollArea.Root className="trace-scroll-area" type="auto">
+              <ScrollArea.Viewport
+                ref={traceViewport}
+                className="trace-viewport"
+                onScroll={(event) => {
+                  tracePinned.current = isNearBottom(event.currentTarget);
+                }}
+              >
+                <ol>
+                  {trace.length === 0 ? (
+                    <li className="empty-state">Waiting for agent activity.</li>
+                  ) : (
+                    trace.map((entry) => (
+                      <li key={entry.id} data-kind={entry.kind}>
+                        <time dateTime={entry.timestamp.toISOString()}>
+                          {formatTime(entry.timestamp)}
+                        </time>
+                        <span>{entry.message}</span>
+                      </li>
+                    ))
+                  )}
+                </ol>
+              </ScrollArea.Viewport>
+              <ScrollArea.Scrollbar orientation="vertical">
+                <ScrollArea.Thumb />
+              </ScrollArea.Scrollbar>
+            </ScrollArea.Root>
+          </div>
+        </details>
+
         <form className="prompt-form" onSubmit={submit}>
-          <label htmlFor="agent-prompt">Prompt</label>
+          <label className="visually-hidden" htmlFor="agent-prompt">
+            Message Bridge Codex
+          </label>
           <textarea
             id="agent-prompt"
             value={prompt}
             onChange={(event) => setPrompt(event.currentTarget.value)}
             onKeyDown={promptKeyDown}
             placeholder={
-              modelSelected ? "Describe the task…" : "Select a model first"
+              modelSelected
+                ? "Ask Bridge to work on something…"
+                : "Choose a model to begin"
             }
             disabled={!modelSelected || sending}
-            aria-describedby="prompt-shortcut"
-            rows={4}
+            rows={3}
           />
-          <p id="prompt-shortcut">Press Ctrl+Enter or Command+Enter to send.</p>
-          <button
-            type="submit"
-            disabled={!prompt.trim() || !modelSelected || sending}
-          >
-            {sending ? "Working…" : "Send task"}
-          </button>
+          <div className="composer-toolbar">
+            <button
+              className="model-pill"
+              type="button"
+              onClick={onOpenRouting}
+            >
+              <Settings2 aria-hidden="true" />
+              <span>{selectedModel || "Choose model"}</span>
+            </button>
+            <div className="composer-status">
+              <span role="status" aria-live="polite">
+                {sending
+                  ? "Bridge is working"
+                  : "Enter to send · Shift+Enter for a new line"}
+              </span>
+              <button
+                className="send-button"
+                type="submit"
+                aria-label={sending ? "Bridge is working" : "Send message"}
+                disabled={!prompt.trim() || !modelSelected || sending}
+              >
+                <ArrowUp aria-hidden="true" />
+              </button>
+            </div>
+          </div>
         </form>
-      </section>
-    </aside>
+      </footer>
+    </main>
   );
 }

@@ -20,12 +20,15 @@ import type {
   SandboxValidationEvent,
 } from "./types";
 
-const SESSION_STORAGE_KEY = "bridge-codex.session.v1";
+const LEGACY_SESSION_STORAGE_KEY = "bridge-codex.session.v1";
+const WORKSPACE_STORAGE_KEY = "bridge-codex.workspace.v2";
 const MAX_TRACE_ENTRIES = 200;
 const MAX_TRACE_MESSAGE_LENGTH = 4_096;
 const MAX_CHAT_MESSAGES = 96;
 const MAX_CHAT_STATE_LENGTH = 2 * 1024 * 1024;
 const MAX_PERSISTED_CHAT_LENGTH = 512 * 1024;
+const MAX_PERSISTED_WORKSPACE_LENGTH = 2 * 1024 * 1024;
+const MAX_CONVERSATIONS = 24;
 const MAX_CHAT_REQUEST_LENGTH = 60 * 1024;
 const MAX_CHAT_REQUEST_MESSAGES = 120;
 const LOGIN_POLL_ATTEMPTS = 60;
@@ -43,6 +46,19 @@ export type UiChatMessage = ChatMessage & {
   streaming?: boolean;
   error?: string | null;
   validation?: CodeValidation;
+};
+
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
+type ConversationThread = {
+  id: string;
+  updatedAt: string;
+  chat: UiChatMessage[];
 };
 
 export type LoginState =
@@ -103,10 +119,11 @@ type InitialSnapshot = {
   codeMemory: PromiseSettledResult<CodeMemoryStatus>;
 };
 
-type PersistedSession = {
+type PersistedWorkspace = {
   selectedModel: string;
   trace: TraceEntry[];
-  chat: UiChatMessage[];
+  activeConversationId: string;
+  conversations: ConversationThread[];
 };
 
 const eventSubscribers = new Set<BridgeEventSubscriber>();
@@ -122,17 +139,28 @@ function nextId(prefix: string): string {
 }
 
 function errorMessage(error: unknown): string {
+  let message: string;
   if (error instanceof Error) {
-    return error.message;
+    message = error.message;
+  } else if (typeof error === "string") {
+    message = error;
+  } else {
+    try {
+      message = JSON.stringify(error) || String(error);
+    } catch {
+      message = String(error);
+    }
   }
-  if (typeof error === "string") {
-    return error;
+
+  if (
+    message.includes("reading 'invoke'") ||
+    message.includes('reading "invoke"') ||
+    message.includes("transformCallback")
+  ) {
+    return "Native Bridge services are unavailable in this web preview. Open the installed desktop app to connect local tools.";
   }
-  try {
-    return JSON.stringify(error) || String(error);
-  } catch {
-    return String(error);
-  }
+
+  return message;
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -182,109 +210,240 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function loadPersistedSession(): PersistedSession {
-  const empty: PersistedSession = { selectedModel: "", trace: [], chat: [] };
-  if (typeof window === "undefined") {
-    return empty;
+function createConversation(chat: UiChatMessage[] = []): ConversationThread {
+  return {
+    id: nextId("conversation"),
+    updatedAt: new Date().toISOString(),
+    chat: boundedChat(chat, MAX_PERSISTED_CHAT_LENGTH),
+  };
+}
+
+function conversationTitle(chat: UiChatMessage[]): string {
+  const firstPrompt = chat.find((message) => message.role === "user")?.content;
+  if (!firstPrompt?.trim()) {
+    return "New task";
   }
+  const cleaned = firstPrompt.slice(0, 100).trim().replace(/\s+/gu, " ");
+}
+
+function parseTrace(value: unknown): TraceEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return boundedTrace(
+    value.flatMap((candidate): TraceEntry[] => {
+      if (
+        !isRecord(candidate) ||
+        typeof candidate.id !== "string" ||
+        typeof candidate.timestamp !== "string" ||
+        typeof candidate.message !== "string" ||
+        !["info", "success", "error"].includes(String(candidate.kind))
+      ) {
+        return [];
+      }
+      const timestamp = new Date(candidate.timestamp);
+      if (Number.isNaN(timestamp.getTime())) {
+        return [];
+      }
+      return [
+        {
+          id: candidate.id,
+          timestamp,
+          kind: candidate.kind as TraceEntry["kind"],
+          message: truncateText(candidate.message, MAX_TRACE_MESSAGE_LENGTH),
+        },
+      ];
+    }),
+  );
+}
+
+function parseChat(value: unknown): UiChatMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return boundedChat(
+    value.flatMap((candidate): UiChatMessage[] => {
+      if (
+        !isRecord(candidate) ||
+        typeof candidate.id !== "string" ||
+        typeof candidate.content !== "string" ||
+        !["system", "user", "assistant"].includes(String(candidate.role))
+      ) {
+        return [];
+      }
+      const interrupted = candidate.streaming === true;
+      return [
+        {
+          id: candidate.id,
+          role: candidate.role as ChatMessage["role"],
+          content: candidate.content,
+          streaming: false,
+          error: interrupted
+            ? "The previous response stream was interrupted when the app closed."
+            : typeof candidate.error === "string"
+              ? candidate.error
+              : null,
+        },
+      ];
+    }),
+    MAX_PERSISTED_CHAT_LENGTH,
+  );
+}
+
+function parseConversations(value: unknown): ConversationThread[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const ids = new Set<string>();
+  return value
+    .flatMap((candidate): ConversationThread[] => {
+      if (
+        !isRecord(candidate) ||
+        typeof candidate.id !== "string" ||
+        !candidate.id ||
+        ids.has(candidate.id) ||
+        typeof candidate.updatedAt !== "string"
+      ) {
+        return [];
+      }
+      const updatedAt = new Date(candidate.updatedAt);
+      if (Number.isNaN(updatedAt.getTime())) {
+        return [];
+      }
+      ids.add(candidate.id);
+      return [
+        {
+          id: candidate.id,
+          updatedAt: updatedAt.toISOString(),
+          chat: parseChat(candidate.chat),
+        },
+      ];
+    })
+    .slice(0, MAX_CONVERSATIONS);
+}
+
+function readPersistedValue(key: string): unknown {
   try {
-    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) {
-      return empty;
-    }
-    const value: unknown = JSON.parse(raw);
-    if (!isRecord(value)) {
-      return empty;
-    }
-    const selectedModel =
-      typeof value.selectedModel === "string"
-        ? value.selectedModel.slice(0, 256)
-        : "";
-    const trace = Array.isArray(value.trace)
-      ? value.trace.flatMap((candidate): TraceEntry[] => {
-          if (
-            !isRecord(candidate) ||
-            typeof candidate.id !== "string" ||
-            typeof candidate.timestamp !== "string" ||
-            typeof candidate.message !== "string" ||
-            !["info", "success", "error"].includes(String(candidate.kind))
-          ) {
-            return [];
-          }
-          const timestamp = new Date(candidate.timestamp);
-          if (Number.isNaN(timestamp.getTime())) {
-            return [];
-          }
-          return [
-            {
-              id: candidate.id,
-              timestamp,
-              kind: candidate.kind as TraceEntry["kind"],
-              message: truncateText(
-                candidate.message,
-                MAX_TRACE_MESSAGE_LENGTH,
-              ),
-            },
-          ];
-        })
-      : [];
-    const chat = Array.isArray(value.chat)
-      ? value.chat.flatMap((candidate): UiChatMessage[] => {
-          if (
-            !isRecord(candidate) ||
-            typeof candidate.id !== "string" ||
-            typeof candidate.content !== "string" ||
-            !["system", "user", "assistant"].includes(String(candidate.role))
-          ) {
-            return [];
-          }
-          const interrupted = candidate.streaming === true;
-          return [
-            {
-              id: candidate.id,
-              role: candidate.role as ChatMessage["role"],
-              content: candidate.content,
-              streaming: false,
-              error: interrupted
-                ? "The previous response stream was interrupted when the app closed."
-                : typeof candidate.error === "string"
-                  ? candidate.error
-                  : null,
-            },
-          ];
-        })
-      : [];
-    return {
-      selectedModel,
-      trace: boundedTrace(trace),
-      chat: boundedChat(chat, MAX_PERSISTED_CHAT_LENGTH),
-    };
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
   } catch {
-    return empty;
+    return null;
   }
 }
 
-function persistSession(session: PersistedSession): void {
+function loadPersistedWorkspace(): PersistedWorkspace {
+  const emptyConversation = createConversation();
+  const empty: PersistedWorkspace = {
+    selectedModel: "",
+    trace: [],
+    activeConversationId: emptyConversation.id,
+    conversations: [emptyConversation],
+  };
+  if (typeof window === "undefined") {
+    return empty;
+  }
+
+  const value = readPersistedValue(WORKSPACE_STORAGE_KEY);
+  if (isRecord(value)) {
+    const conversations = parseConversations(value.conversations);
+    if (conversations.length > 0) {
+      const requestedActiveId =
+        typeof value.activeConversationId === "string"
+          ? value.activeConversationId
+          : "";
+      const activeConversationId = conversations.some(
+        (conversation) => conversation.id === requestedActiveId,
+      )
+        ? requestedActiveId
+        : conversations[0]?.id;
+      if (activeConversationId) {
+        return {
+          selectedModel:
+            typeof value.selectedModel === "string"
+              ? value.selectedModel.slice(0, 256)
+              : "",
+          trace: parseTrace(value.trace),
+          activeConversationId,
+          conversations,
+        };
+      }
+    }
+  }
+
+  const legacy = readPersistedValue(LEGACY_SESSION_STORAGE_KEY);
+  if (!isRecord(legacy)) {
+    return empty;
+  }
+  const migratedConversation = createConversation(parseChat(legacy.chat));
+  return {
+    selectedModel:
+      typeof legacy.selectedModel === "string"
+        ? legacy.selectedModel.slice(0, 256)
+        : "",
+    trace: parseTrace(legacy.trace),
+    activeConversationId: migratedConversation.id,
+    conversations: [migratedConversation],
+  };
+}
+
+function serializableConversation(conversation: ConversationThread) {
+  return {
+    id: conversation.id,
+    updatedAt: conversation.updatedAt,
+    chat: boundedChat(conversation.chat, MAX_PERSISTED_CHAT_LENGTH).map(
+      ({ id, role, content, streaming, error }) => ({
+        id,
+        role,
+        content,
+        streaming,
+        error,
+      }),
+    ),
+  };
+}
+
+function persistWorkspace(workspace: PersistedWorkspace): void {
   try {
+    const orderedConversations = [
+      ...workspace.conversations.filter(
+        (conversation) => conversation.id === workspace.activeConversationId,
+      ),
+      ...workspace.conversations.filter(
+        (conversation) => conversation.id !== workspace.activeConversationId,
+      ),
+    ].slice(0, MAX_CONVERSATIONS);
+    const trace = boundedTrace(workspace.trace).map((entry) => ({
+      ...entry,
+      timestamp: entry.timestamp.toISOString(),
+    }));
+    const conversations: ReturnType<typeof serializableConversation>[] = [];
+    for (const conversation of orderedConversations) {
+      const serializedConversation = serializableConversation(conversation);
+      const candidate = [...conversations, serializedConversation];
+      const payload = JSON.stringify({
+        selectedModel: workspace.selectedModel,
+        trace,
+        activeConversationId: workspace.activeConversationId,
+        conversations: candidate,
+      });
+      if (
+        payload.length > MAX_PERSISTED_WORKSPACE_LENGTH &&
+        conversations.length > 0
+      ) {
+        break;
+      }
+      conversations.push(serializedConversation);
+    }
     window.localStorage.setItem(
-      SESSION_STORAGE_KEY,
+      WORKSPACE_STORAGE_KEY,
       JSON.stringify({
-        selectedModel: session.selectedModel,
-        trace: boundedTrace(session.trace).map((entry) => ({
-          ...entry,
-          timestamp: entry.timestamp.toISOString(),
-        })),
-        chat: boundedChat(session.chat, MAX_PERSISTED_CHAT_LENGTH).map(
-          ({ id, role, content, streaming, error }) => ({
-            id,
-            role,
-            content,
-            streaming,
-            error,
-          }),
-        ),
+        selectedModel: workspace.selectedModel,
+        trace,
+        activeConversationId: workspace.activeConversationId,
+        conversations,
       }),
     );
+    window.localStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
   } catch {
     // Persistence is a best-effort convenience; Tauri may disable web storage.
   }
@@ -451,7 +610,7 @@ const initialErrors: BridgeErrorState = {
 };
 
 export function useBridgeState() {
-  const [persisted] = useState(loadPersistedSession);
+  const [persisted] = useState(loadPersistedWorkspace);
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
   const [browserStatus, setBrowserStatus] = useState<BrowserStatus | null>(
     null,
@@ -474,7 +633,16 @@ export function useBridgeState() {
   const [models, setModels] = useState<ProxyModel[]>([]);
   const [selectedModel, setSelectedModel] = useState(persisted.selectedModel);
   const [trace, setTrace] = useState<TraceEntry[]>(persisted.trace);
-  const [chat, setChat] = useState<UiChatMessage[]>(persisted.chat);
+  const [activeConversationId, setActiveConversationId] = useState(
+    persisted.activeConversationId,
+  );
+  const [conversations, setConversations] = useState(persisted.conversations);
+  const [chat, setChat] = useState<UiChatMessage[]>(
+    () =>
+      persisted.conversations.find(
+        (conversation) => conversation.id === persisted.activeConversationId,
+      )?.chat ?? [],
+  );
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState<BridgeLoadingState>(initialLoading);
   const [errors, setErrors] = useState<BridgeErrorState>(initialErrors);
@@ -497,6 +665,37 @@ export function useBridgeState() {
   useEffect(() => {
     a2aTasksRef.current = a2aTasks;
   }, [a2aTasks]);
+
+  useEffect(() => {
+    setConversations((current) => {
+      const active = current.find(
+        (conversation) => conversation.id === activeConversationId,
+      );
+      if (!active) {
+        const created = {
+          id: activeConversationId,
+          updatedAt: new Date().toISOString(),
+          chat,
+        };
+        return [created, ...current].slice(0, MAX_CONVERSATIONS);
+      }
+      if (active.chat === chat && current[0]?.id === activeConversationId) {
+        return current;
+      }
+      const updated = {
+        ...active,
+        updatedAt:
+          active.chat === chat ? active.updatedAt : new Date().toISOString(),
+        chat,
+      };
+      return [
+        updated,
+        ...current.filter(
+          (conversation) => conversation.id !== activeConversationId,
+        ),
+      ].slice(0, MAX_CONVERSATIONS);
+    });
+  }, [activeConversationId, chat]);
 
   const setResourceLoading = useCallback(
     (resource: LoadingResource, value: boolean) => {
@@ -862,11 +1061,17 @@ export function useBridgeState() {
 
   useEffect(() => {
     const timeout = window.setTimeout(
-      () => persistSession({ selectedModel, trace, chat }),
+      () =>
+        persistWorkspace({
+          selectedModel,
+          trace,
+          activeConversationId,
+          conversations,
+        }),
       300,
     );
     return () => window.clearTimeout(timeout);
-  }, [chat, selectedModel, trace]);
+  }, [activeConversationId, conversations, selectedModel, trace]);
 
   const refreshAll = useCallback(async () => {
     setLoading((current) => ({ ...current, initial: true }));
@@ -1471,6 +1676,83 @@ export function useBridgeState() {
   }, [appendTrace, chat, sendPrompt]);
 
   const clearTrace = useCallback(() => setTrace([]), []);
+  const newConversation = useCallback(() => {
+    if (sendingRef.current) {
+      appendTrace(
+        "Wait for the active response before starting a new conversation",
+        "error",
+      );
+      return;
+    }
+    const conversation = createConversation();
+    setConversations((current) =>
+      [
+        conversation,
+        ...current.flatMap((candidate) => {
+          if (candidate.id !== activeConversationId) {
+            return [candidate];
+          }
+          if (chat.length === 0) {
+            return [];
+          }
+          return [
+            {
+              ...candidate,
+              updatedAt:
+                candidate.chat === chat
+                  ? candidate.updatedAt
+                  : new Date().toISOString(),
+              chat,
+            },
+          ];
+        }),
+      ].slice(0, MAX_CONVERSATIONS),
+    );
+    setActiveConversationId(conversation.id);
+    setChat(conversation.chat);
+    setResourceError("chat", null);
+  }, [activeConversationId, appendTrace, chat, setResourceError]);
+
+  const selectConversation = useCallback(
+    (id: string) => {
+      if (id === activeConversationId) {
+        return;
+      }
+      if (sendingRef.current) {
+        appendTrace(
+          "Wait for the active response before switching conversations",
+          "error",
+        );
+        return;
+      }
+      const conversation = conversations.find(
+        (candidate) => candidate.id === id,
+      );
+      if (!conversation) {
+        appendTrace("That conversation is no longer available", "error");
+        return;
+      }
+      setConversations((current) =>
+        current.map((candidate) =>
+          candidate.id === activeConversationId
+            ? {
+                ...candidate,
+                updatedAt:
+                  candidate.chat === chat
+                    ? candidate.updatedAt
+                    : new Date().toISOString(),
+                chat,
+              }
+            : candidate,
+        ),
+      );
+      setActiveConversationId(conversation.id);
+      setChat(conversation.chat);
+      setResourceError("chat", null);
+    },
+    [activeConversationId, appendTrace, chat, conversations, setResourceError],
+  );
+
   const clearChat = useCallback(() => {
     if (sendingRef.current) {
       appendTrace("Wait for the active response before clearing chat", "error");
@@ -1555,6 +1837,15 @@ export function useBridgeState() {
     setResourceError("login", null);
   }, [setResourceError, setResourceLoading]);
 
+  const conversationSummaries: ConversationSummary[] = conversations.map(
+    (conversation) => ({
+      id: conversation.id,
+      title: conversationTitle(conversation.chat),
+      updatedAt: conversation.updatedAt,
+      messageCount: conversation.chat.length,
+    }),
+  );
+
   return {
     proxyStatus,
     browserStatus,
@@ -1572,6 +1863,8 @@ export function useBridgeState() {
     setSelectedModel,
     trace,
     chat,
+    activeConversationId,
+    conversations: conversationSummaries,
     sending,
     browserBusy: loading.browser,
     desktopBusy: loading.desktop,
@@ -1609,6 +1902,8 @@ export function useBridgeState() {
     clearCodeMemoryResults,
     sendPrompt,
     retryLastPrompt,
+    newConversation,
+    selectConversation,
     clearTrace,
     clearChat,
     launchLogin,

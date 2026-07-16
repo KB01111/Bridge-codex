@@ -54,7 +54,7 @@ export function RoutingPanel({
         <div className="section-heading-row">
           <div>
             <h3 id="model-heading">Active model</h3>
-            <p>Routes chat and delegated A2A tasks through CLIProxyAPI.</p>
+            <p>Choose the model used for conversations and delegated tasks.</p>
           </div>
           <button
             type="button"
@@ -145,8 +145,8 @@ export function RoutingPanel({
           {proxyStatus === null
             ? "Checking the local router…"
             : proxyStatus.running
-              ? "CLIProxyAPI is ready for authenticated requests."
-              : "Start the local router before connecting an account."}
+              ? "The local model service is ready."
+              : "Start the local model service before connecting an account."}
         </p>
         {proxyStatus?.binaryPath && (
           <p title={proxyStatus.binaryPath}>
@@ -175,9 +175,9 @@ export function RoutingPanel({
             <Dialog.Content className="login-dialog">
               <Dialog.Title>Connect a ChatGPT account</Dialog.Title>
               <Dialog.Description>
-                CLIProxyAPI opens its Codex OAuth flow in the system browser.
-                Credentials stay with the local router and are not handled by
-                the React interface.
+                The local model service opens its Codex sign-in flow in the
+                system browser. Credentials stay with that service and are not
+                handled by Bridge Codex.
               </Dialog.Description>
 
               {loginState.phase === "idle" && (
@@ -269,8 +269,8 @@ export function RoutingPanel({
 
       {error && <p role="alert">{error}</p>}
 
-      <section className="sandbox-control" aria-labelledby="sandbox-heading">
-        <h3 id="sandbox-heading">Execution contract</h3>
+      <details className="sandbox-control">
+        <summary id="sandbox-heading">Safety and execution details</summary>
         {codePolicyStatus ? (
           <dl>
             <div>
@@ -304,7 +304,7 @@ export function RoutingPanel({
         ) : (
           <p role="status">Loading sandbox policy…</p>
         )}
-      </section>
+      </details>
     </div>
   );
 }
