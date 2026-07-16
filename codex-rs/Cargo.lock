@@ -2219,6 +2219,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "codex-agent-extension",
  "codex-analytics",
  "codex-app-server-protocol",
  "codex-app-server-transport",
@@ -2259,6 +2260,7 @@ dependencies = [
  "codex-rollout",
  "codex-sandboxing",
  "codex-shell-command",
+ "codex-skills",
  "codex-skills-extension",
  "codex-state",
  "codex-thread-store",
@@ -2876,6 +2878,7 @@ dependencies = [
  "codex-utils-path-uri",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3068,6 +3071,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -3317,9 +3321,17 @@ name = "codex-external-agent-migration"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "codex-analytics",
  "codex-app-server-protocol",
+ "codex-config",
+ "codex-core",
+ "codex-core-plugins",
  "codex-hooks",
+ "codex-memories-write",
+ "codex-otel",
+ "codex-plugin",
  "codex-protocol",
+ "codex-rollout",
  "codex-utils-output-truncation",
  "pretty_assertions",
  "serde",
@@ -3327,7 +3339,9 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "toml 0.9.11+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -3665,6 +3679,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-plugins",
  "futures",
+ "lru 0.16.3",
  "pretty_assertions",
  "regex-lite",
  "rmcp",
@@ -4127,6 +4142,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "codex-extension-items",
  "codex-file-search",
  "codex-git-utils",
  "codex-otel",

@@ -509,6 +509,9 @@
             "experimental_windows_sandbox": {
               "type": "boolean"
             },
+            "external_agent_memory_import": {
+              "type": "boolean"
+            },
             "external_migration": {
               "type": "boolean"
             },
@@ -2640,7 +2643,8 @@
     "RealtimeConversationVersion": {
       "enum": [
         "v1",
-        "v2"
+        "v2",
+        "v3"
       ],
       "type": "string"
     },
@@ -2923,6 +2927,17 @@
     "TokenBudgetConfigToml": {
       "additionalProperties": false,
       "properties": {
+        "auto_compact_fallback_buffer_tokens": {
+          "description": "Additional tokens available after the compaction threshold for fallback note-taking.",
+          "format": "int64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "auto_compact_fallback_prompt": {
+          "description": "Developer message sampled before an automatic context-window rollover.",
+          "maxLength": 2000,
+          "type": "string"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -4886,6 +4901,9 @@
           "type": "boolean"
         },
         "experimental_windows_sandbox": {
+          "type": "boolean"
+        },
+        "external_agent_memory_import": {
           "type": "boolean"
         },
         "external_migration": {
