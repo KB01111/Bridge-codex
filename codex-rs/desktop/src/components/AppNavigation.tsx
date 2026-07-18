@@ -14,29 +14,34 @@ import {
   Sun,
   type LucideIcon,
 } from "lucide-react";
+import { memo } from "react";
 
+import type { RuntimeThreadSummary } from "../agentRuntimeReducer";
+import type { ThemePreference } from "../localData";
 import type { A2aStatus, A2aTask, BrowserStatus, ProxyStatus } from "../types";
-import type { ConversationSummary } from "../useBridgeState";
 
 export type ToolView = "browser" | "desktop" | "routing" | "tasks" | "memory";
 
 export type AppNavigationProps = {
   activeTool: ToolView | null;
   collapsed: boolean;
-  theme: "light" | "dark";
+  compact: boolean;
+  theme: ThemePreference;
   proxyStatus: ProxyStatus | null;
   browserStatus: BrowserStatus | null;
   a2aStatus: A2aStatus | null;
   a2aTasks: A2aTask[];
-  conversations: ConversationSummary[];
+  conversations: RuntimeThreadSummary[];
   activeConversationId: string;
+  repositoryRoot: string;
   selectedModel: string;
   sending: boolean;
   onToggleCollapsed: () => void;
-  onToggleTheme: () => void;
-  onSelectTool: (tool: ToolView) => void;
+  onThemeChange: (theme: ThemePreference) => void;
+  onSelectTool: (tool: ToolView, trigger: HTMLButtonElement) => void;
   onNewTask: () => void;
   onSelectConversation: (id: string) => void;
+  onRepositoryRootChange: (root: string) => void;
 };
 
 type ToolNavigationItem = {
@@ -46,7 +51,12 @@ type ToolNavigationItem = {
   icon: LucideIcon;
 };
 
-type ServiceState = "checking" | "online" | "offline" | "degraded";
+type ServiceState =
+  | "checking"
+  | "online"
+  | "offline"
+  | "degraded"
+  | "disabled";
 
 const primaryTools: ToolNavigationItem[] = [
   {
@@ -114,6 +124,16 @@ function browserServiceState(status: BrowserStatus | null): ServiceState {
   return status.running ? "online" : "offline";
 }
 
+function a2aServiceState(status: A2aStatus | null): ServiceState {
+  if (!status) {
+    return "checking";
+  }
+  if (!status.enabled) {
+    return "disabled";
+  }
+  return status.running ? "online" : "offline";
+}
+
 function serviceStateLabel(state: ServiceState): string {
   switch (state) {
     case "checking":
@@ -124,6 +144,8 @@ function serviceStateLabel(state: ServiceState): string {
       return "Offline";
     case "degraded":
       return "Degraded";
+    case "disabled":
+      return "Disabled";
   }
 }
 
@@ -138,7 +160,7 @@ function ToolButton({
   active: boolean;
   collapsed: boolean;
   count?: number;
-  onSelect: (tool: ToolView) => void;
+  onSelect: (tool: ToolView, trigger: HTMLButtonElement) => void;
 }) {
   const Icon = item.icon;
   const countLabel = !count ? null : count > 99 ? "99+" : count;
@@ -150,10 +172,11 @@ function ToolButton({
       className="app-navigation__item"
       type="button"
       data-active={active || undefined}
-      aria-current={active ? "page" : undefined}
+      aria-controls="tool-drawer"
+      aria-expanded={active}
       aria-label={accessibleLabel}
       title={collapsed ? item.description : undefined}
-      onClick={() => onSelect(item.id)}
+      onClick={(event) => onSelect(item.id, event.currentTarget)}
     >
       <Icon aria-hidden="true" size={18} strokeWidth={1.8} />
       {!collapsed && (
@@ -170,9 +193,10 @@ function ToolButton({
   );
 }
 
-export function AppNavigation({
+export const AppNavigation = memo(function AppNavigation({
   activeTool,
   collapsed,
+  compact,
   theme,
   proxyStatus,
   browserStatus,
@@ -180,18 +204,20 @@ export function AppNavigation({
   a2aTasks,
   conversations,
   activeConversationId,
+  repositoryRoot,
   selectedModel,
   sending,
   onToggleCollapsed,
-  onToggleTheme,
+  onThemeChange,
   onSelectTool,
   onNewTask,
   onSelectConversation,
+  onRepositoryRootChange,
 }: AppNavigationProps) {
   const conversationList = conversations;
   const proxyState = basicServiceState(proxyStatus?.running ?? null);
   const browserState = browserServiceState(browserStatus);
-  const a2aState = basicServiceState(a2aStatus?.running ?? null);
+  const a2aState = a2aServiceState(a2aStatus);
   const modelName = selectedModel || "No model selected";
   const modelState = sending
     ? "Responding"
@@ -202,8 +228,7 @@ export function AppNavigation({
         : proxyState === "checking"
           ? "Checking router"
           : "Router offline";
-  const nextTheme = theme === "dark" ? "light" : "dark";
-  const ThemeIcon = theme === "dark" ? Sun : Moon;
+  const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
 
   const services = [
     { label: "Router", state: proxyState },
@@ -224,20 +249,38 @@ export function AppNavigation({
           </span>
           {!collapsed && <strong>Bridge Codex</strong>}
         </div>
-        <button
-          className="app-navigation__icon-button"
-          type="button"
-          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
-          aria-expanded={!collapsed}
-          title={collapsed ? "Expand navigation" : "Collapse navigation"}
-          onClick={onToggleCollapsed}
-        >
-          {collapsed ? (
-            <PanelLeftOpen aria-hidden="true" size={18} />
-          ) : (
-            <PanelLeftClose aria-hidden="true" size={18} />
-          )}
-        </button>
+        {!compact && (
+          <button
+            className="app-navigation__icon-button"
+            type="button"
+            aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+            aria-expanded={!collapsed}
+            title={collapsed ? "Expand navigation" : "Collapse navigation"}
+            onClick={onToggleCollapsed}
+          >
+            {collapsed ? (
+              <PanelLeftOpen aria-hidden="true" size={18} />
+            ) : (
+              <PanelLeftClose aria-hidden="true" size={18} />
+            )}
+          </button>
+        )}
+
+        {!collapsed && (
+          <label className="app-navigation__repository-root">
+            <span>Repository root</span>
+            <input
+              type="text"
+              value={repositoryRoot}
+              placeholder="C:\\path\\to\\repository"
+              spellCheck={false}
+              onChange={(event) =>
+                onRepositoryRootChange(event.currentTarget.value)
+              }
+            />
+            <small>Used only when starting a thread. Never stored by Bridge.</small>
+          </label>
+        )}
       </header>
 
       <div className="app-navigation__body">
@@ -370,19 +413,22 @@ export function AppNavigation({
           ))}
         </ul>
 
-        <button
-          className="app-navigation__theme-toggle"
-          type="button"
-          aria-label={`Use ${nextTheme} theme`}
-          title={`Use ${nextTheme} theme`}
-          onClick={onToggleTheme}
-        >
+        <label className="app-navigation__theme-toggle">
           <ThemeIcon aria-hidden="true" size={17} strokeWidth={1.8} />
-          {!collapsed && (
-            <span>{theme === "dark" ? "Light" : "Dark"} theme</span>
-          )}
-        </button>
+          <select
+            aria-label="Color theme"
+            title={collapsed ? `${theme} theme` : undefined}
+            value={theme}
+            onChange={(event) =>
+              onThemeChange(event.currentTarget.value as ThemePreference)
+            }
+          >
+            <option value="system">System theme</option>
+            <option value="light">Light theme</option>
+            <option value="dark">Dark theme</option>
+          </select>
+        </label>
       </footer>
     </aside>
   );
-}
+});

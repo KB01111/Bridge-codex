@@ -1,25 +1,34 @@
-import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useState } from "react";
+import { type Dispatch, type FormEvent, useEffect, useState } from "react";
 
+import type { BridgeAgentRuntimeStatus } from "../agentRuntime";
+import type {
+  LocalDataAction,
+  LocalDataState,
+} from "../localDataReducer";
 import type { CodePolicyStatus, ProxyModel, ProxyStatus } from "../types";
-import type { LoginState, LoginVerificationState } from "../useBridgeState";
+import { LocalDataPanel } from "./LocalDataPanel";
 
 export type RoutingPanelProps = {
   proxyStatus: ProxyStatus | null;
   codePolicyStatus: CodePolicyStatus | null;
   models: ProxyModel[];
   selectedModel: string;
-  loginState: LoginState;
-  loginVerification: LoginVerificationState;
+  runtimeStatus: BridgeAgentRuntimeStatus | null;
   busy: boolean;
   error?: string | null;
   onSelectModel: (model: string) => void;
   onRefreshModels: () => Promise<void>;
-  onEnsureProxy: () => Promise<void>;
-  onLaunchLogin: () => Promise<void>;
-  onVerifyLogin: () => Promise<void>;
-  onResetLogin: () => void;
+  onConfigureProxy: (baseUrl: string, apiKey: string) => Promise<void>;
+  localDataState: LocalDataState;
+  dispatchLocalData: Dispatch<LocalDataAction>;
+  conversationCount: number;
+  currentMessageCount: number;
+  localDataBusy: boolean;
+  onExportSession: () => void;
+  onArchiveCurrent: () => void;
+  onDeleteAllLocalData: () => Promise<boolean>;
+  onExportSupportBundle: () => Promise<string>;
 };
 
 export function RoutingPanel({
@@ -27,25 +36,79 @@ export function RoutingPanel({
   codePolicyStatus,
   models,
   selectedModel,
-  loginState,
-  loginVerification,
+  runtimeStatus,
   busy,
   error,
   onSelectModel,
   onRefreshModels,
-  onEnsureProxy,
-  onLaunchLogin,
-  onVerifyLogin,
-  onResetLogin,
+  onConfigureProxy,
+  localDataState,
+  dispatchLocalData,
+  conversationCount,
+  currentMessageCount,
+  localDataBusy,
+  onExportSession,
+  onArchiveCurrent,
+  onDeleteAllLocalData,
+  onExportSupportBundle,
 }: RoutingPanelProps) {
-  const [loginOpen, setLoginOpen] = useState(false);
+  const [baseUrl, setBaseUrl] = useState(
+    proxyStatus?.baseUrl || "http://127.0.0.1:8317/",
+  );
+  const [apiKey, setApiKey] = useState("");
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const selected = models.find((model) => model.id === selectedModel);
+  const probedModel = proxyStatus?.probedModel ?? null;
 
-  function changeLoginOpen(open: boolean) {
-    setLoginOpen(open);
-    if (!open) {
-      onResetLogin();
+  useEffect(() => {
+    if (proxyStatus?.baseUrl) {
+      setBaseUrl(proxyStatus.baseUrl);
     }
+  }, [proxyStatus?.baseUrl]);
+
+  async function connectProxy(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      const url = new URL(baseUrl);
+      const loopback =
+        url.hostname.toLowerCase() === "localhost" ||
+        url.hostname.startsWith("127.") ||
+        url.hostname === "[::1]";
+      if (
+        url.protocol !== "http:" ||
+        !loopback ||
+        url.username ||
+        url.password ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash
+      ) {
+        throw new Error(
+          "Use an HTTP loopback origin without credentials, path, query, or fragment.",
+        );
+      }
+      if (!apiKey.trim()) {
+        throw new Error("Enter the proxy API key.");
+      }
+      setConnectionError(null);
+      await onConfigureProxy(url.toString(), apiKey);
+    } catch (connectionFailure) {
+      setConnectionError(
+        connectionFailure instanceof Error
+          ? connectionFailure.message
+          : "The proxy connection could not be configured.",
+      );
+    } finally {
+      setApiKey("");
+    }
+  }
+
+  function modelSafetyLabel(model: ProxyModel): string {
+    const classification =
+      model.classification === "known" ? "Known" : "Experimental";
+    return model.id === probedModel
+      ? `${classification} · conformance tested`
+      : `${classification} · unavailable · not conformance tested`;
   }
 
   return (
@@ -95,12 +158,16 @@ export function RoutingPanel({
                   onValueChange={onSelectModel}
                 >
                   {models.map((model) => (
-                    <DropdownMenu.RadioItem key={model.id} value={model.id}>
+                    <DropdownMenu.RadioItem
+                      key={model.id}
+                      value={model.id}
+                      disabled={model.id !== probedModel}
+                    >
                       <DropdownMenu.ItemIndicator aria-hidden="true">
                         ●
                       </DropdownMenu.ItemIndicator>
                       <span>{model.id}</span>
-                      {model.ownedBy && <small>{model.ownedBy}</small>}
+                      <small>{modelSafetyLabel(model)}</small>
                     </DropdownMenu.RadioItem>
                   ))}
                 </DropdownMenu.RadioGroup>
@@ -111,8 +178,8 @@ export function RoutingPanel({
 
         {models.length === 0 && !busy && (
           <p className="empty-state">
-            No authenticated models are available. Start the router and connect
-            an account.
+            No authenticated models are available. Connect a compatible
+            loopback proxy first.
           </p>
         )}
         {selected && (
@@ -128,6 +195,10 @@ export function RoutingPanel({
                 <dd>{selected.ownedBy ?? "Not reported"}</dd>
               </div>
               <div>
+                <dt>Classification</dt>
+                <dd>{modelSafetyLabel(selected)}</dd>
+              </div>
+              <div>
                 <dt>Object</dt>
                 <dd>{selected.object ?? "model"}</dd>
               </div>
@@ -140,137 +211,100 @@ export function RoutingPanel({
         className="connection-control"
         aria-labelledby="connection-heading"
       >
-        <h3 id="connection-heading">Account connection</h3>
-        <p>
-          {proxyStatus === null
-            ? "Checking the local router…"
-            : proxyStatus.running
-              ? "The local model service is ready."
-              : "Start the local model service before connecting an account."}
-        </p>
-        {proxyStatus?.binaryPath && (
-          <p title={proxyStatus.binaryPath}>
-            Router binary: {proxyStatus.binaryPath}
+        <h3 id="connection-heading">Loopback model proxy</h3>
+        {proxyStatus?.authenticated && proxyStatus.responsesApi ? (
+          <div className="connection-locked" role="status">
+            <strong>Connected and locked</strong>
+            <p>
+              Bridge is using the configured loopback origin. The API key is
+              held by the native credential store and is never returned to this
+              interface.
+            </p>
+          </div>
+        ) : (
+          <form className="proxy-connect-form" onSubmit={connectProxy}>
+            <p>
+              First-run setup accepts only an HTTP loopback origin. Bridge
+              passes the key directly to the native credential store and clears
+              this field after the request.
+            </p>
+            <label>
+              Loopback base URL
+              <input
+                type="url"
+                value={baseUrl}
+                spellCheck={false}
+                autoComplete="off"
+                onChange={(event) => setBaseUrl(event.currentTarget.value)}
+              />
+            </label>
+            <label>
+              Proxy API key
+              <input
+                type="password"
+                value={apiKey}
+                autoComplete="new-password"
+                onChange={(event) => setApiKey(event.currentTarget.value)}
+              />
+            </label>
+            <button type="submit" disabled={busy || !apiKey.trim()}>
+              {busy ? "Connecting…" : "Connect proxy"}
+            </button>
+          </form>
+        )}
+        {models.length > 0 && (
+          <p className="model-availability-note">
+            Only {probedModel ?? "the model that passes setup"} is available
+            for RC1. Other reported identifiers remain visible but cannot run
+            until they pass the Responses and tool-call conformance probe.
           </p>
         )}
-        {proxyStatus?.error && <p role="alert">{proxyStatus.error}</p>}
-        {!proxyStatus?.running && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void onEnsureProxy()}
-          >
-            {busy ? "Starting…" : "Start local router"}
-          </button>
+        {(connectionError || proxyStatus?.error) && (
+          <p role="alert">{connectionError ?? proxyStatus?.error}</p>
         )}
-
-        <Dialog.Root open={loginOpen} onOpenChange={changeLoginOpen}>
-          <Dialog.Trigger asChild>
-            <button type="button" disabled={!proxyStatus?.running || busy}>
-              Connect ChatGPT account
-            </button>
-          </Dialog.Trigger>
-          <Dialog.Portal>
-            <Dialog.Overlay className="dialog-overlay" />
-            <Dialog.Content className="login-dialog">
-              <Dialog.Title>Connect a ChatGPT account</Dialog.Title>
-              <Dialog.Description>
-                The local model service opens its Codex sign-in flow in the
-                system browser. Credentials stay with that service and are not
-                handled by Bridge Codex.
-              </Dialog.Description>
-
-              {loginState.phase === "idle" && (
-                <div className="dialog-actions">
-                  <Dialog.Close asChild>
-                    <button type="button">Cancel</button>
-                  </Dialog.Close>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void onLaunchLogin()}
-                  >
-                    Open browser login
-                  </button>
-                </div>
-              )}
-              {loginState.phase === "launching" && (
-                <p role="status">Opening login…</p>
-              )}
-              {loginState.phase === "launched" && (
-                <div>
-                  {loginVerification.phase === "verified" ? (
-                    <p role="status">
-                      Connection verified with {loginVerification.modelCount}{" "}
-                      model
-                      {loginVerification.modelCount === 1 ? "" : "s"}.
-                    </p>
-                  ) : loginVerification.phase === "checking" ? (
-                    <p role="status">
-                      Waiting for OAuth completion (check{" "}
-                      {loginVerification.attempt} of 60)…
-                    </p>
-                  ) : loginVerification.phase === "pending" ? (
-                    <p role="alert">{loginVerification.error}</p>
-                  ) : (
-                    <p role="status">
-                      Login opened in process {loginState.launch.processId}.
-                      Complete it in the system browser, then verify the
-                      connection.
-                    </p>
-                  )}
-                  <div className="dialog-actions">
-                    <Dialog.Close asChild>
-                      <button type="button">
-                        {loginVerification.phase === "verified"
-                          ? "Done"
-                          : "Verify later"}
-                      </button>
-                    </Dialog.Close>
-                    {loginVerification.phase !== "verified" && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void onVerifyLogin()}
-                      >
-                        {loginVerification.phase === "checking"
-                          ? "Verifying…"
-                          : "Verify connection"}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-              {loginState.phase === "error" && (
-                <div role="alert">
-                  <p>{loginState.error}</p>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void onLaunchLogin()}
-                  >
-                    Try again
-                  </button>
-                </div>
-              )}
-              <Dialog.Close asChild>
-                <button
-                  className="dialog-close"
-                  type="button"
-                  aria-label="Close login dialog"
-                >
-                  ×
-                </button>
-              </Dialog.Close>
-            </Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
+        {proxyStatus?.probedModel && (
+          <p>Responses probe: {proxyStatus.probedModel}</p>
+        )}
+        {Boolean(proxyStatus?.experimentalModelCount) && (
+          <p>
+            {proxyStatus?.experimentalModelCount} experimental model
+            {proxyStatus?.experimentalModelCount === 1 ? " identifier" : " identifiers"} reported.
+            Unprobed identifiers remain disabled.
+          </p>
+        )}
       </section>
 
       {error && <p role="alert">{error}</p>}
 
+      <section className="runtime-safety" aria-labelledby="runtime-heading">
+        <h3 id="runtime-heading">Live app-server runtime</h3>
+        <dl>
+          <div>
+            <dt>State</dt>
+            <dd>{runtimeStatus?.running ? "Running" : "Not running"}</dd>
+          </div>
+          <div>
+            <dt>Filesystem</dt>
+            <dd>workspace-write</dd>
+          </div>
+          <div>
+            <dt>Network</dt>
+            <dd>Denied by default</dd>
+          </div>
+          <div>
+            <dt>Approvals</dt>
+            <dd>User mediated</dd>
+          </div>
+        </dl>
+        {runtimeStatus?.error && <p role="alert">{runtimeStatus.error}</p>}
+      </section>
+
       <details className="sandbox-control">
-        <summary id="sandbox-heading">Safety and execution details</summary>
+        <summary id="sandbox-heading">Static code-policy preview only</summary>
+        <p>
+          This parser contract is informational and does not describe the live
+          app-server sandbox shown above.
+        </p>
         {codePolicyStatus ? (
           <dl>
             <div>
@@ -305,6 +339,18 @@ export function RoutingPanel({
           <p role="status">Loading sandbox policy…</p>
         )}
       </details>
+
+      <LocalDataPanel
+        state={localDataState}
+        dispatch={dispatchLocalData}
+        conversationCount={conversationCount}
+        currentMessageCount={currentMessageCount}
+        busy={localDataBusy}
+        onExportSession={onExportSession}
+        onArchiveCurrent={onArchiveCurrent}
+        onDeleteAll={onDeleteAllLocalData}
+        onExportSupportBundle={onExportSupportBundle}
+      />
     </div>
   );
 }

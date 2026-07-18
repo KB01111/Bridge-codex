@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { type FormEvent, useEffect, useState } from "react";
 
 import type {
@@ -7,6 +8,7 @@ import type {
   DelegateA2aTaskRequest,
   ProxyModel,
 } from "../types";
+import { A2aSecurityPanel } from "./A2aSecurityPanel";
 
 export type TasksPanelProps = {
   status: A2aStatus | null;
@@ -20,6 +22,9 @@ export type TasksPanelProps = {
   onSelectTask: (id: string | null) => void;
   onDelegate: (request: DelegateA2aTaskRequest) => Promise<void>;
   onCancel: (id: string) => Promise<void>;
+  onConfigureServer: (enabled: boolean, port: number) => Promise<unknown>;
+  onProvisionToken: (regenerate: boolean) => Promise<string | null>;
+  onDeleteToken: () => Promise<unknown>;
 };
 
 function taskStateLabel(state: A2aTaskState): string {
@@ -55,10 +60,14 @@ export function TasksPanel({
   onSelectTask,
   onDelegate,
   onCancel,
+  onConfigureServer,
+  onProvisionToken,
+  onDeleteToken,
 }: TasksPanelProps) {
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState(defaultModel);
   const [contextId, setContextId] = useState("");
+  const [cancelConfirmationOpen, setCancelConfirmationOpen] = useState(false);
 
   useEffect(() => {
     if (!model && defaultModel) {
@@ -85,6 +94,13 @@ export function TasksPanel({
 
   return (
     <div className="tasks-panel" aria-busy={busy}>
+      <A2aSecurityPanel
+        status={status}
+        busy={busy}
+        onConfigure={onConfigureServer}
+        onProvisionToken={onProvisionToken}
+        onDeleteToken={onDeleteToken}
+      />
       <section aria-labelledby="delegate-heading">
         <div className="section-heading-row">
           <div>
@@ -93,10 +109,22 @@ export function TasksPanel({
               Run focused work independently through the local task service.
             </p>
           </div>
-          <span data-state={status?.running ? "online" : "offline"}>
+          <span
+            data-state={
+              status === null
+                ? "checking"
+                : !status.enabled
+                  ? "disabled"
+                  : status.running
+                    ? "online"
+                    : "offline"
+            }
+          >
             {status === null
               ? "Checking…"
-              : status.running
+              : !status.enabled
+                ? "Disabled"
+                : status.running
                 ? "Listening"
                 : "Offline"}
           </span>
@@ -112,7 +140,7 @@ export function TasksPanel({
             value={prompt}
             onChange={(event) => setPrompt(event.currentTarget.value)}
             placeholder="Describe the work to delegate"
-            disabled={!status?.running || busy}
+            disabled={!status?.enabled || !status.running || busy}
             required
           />
 
@@ -121,7 +149,7 @@ export function TasksPanel({
             id="a2a-model"
             value={model}
             onChange={(event) => setModel(event.currentTarget.value)}
-            disabled={!status?.running || busy}
+            disabled={!status?.enabled || !status.running || busy}
           >
             <option value="">Use active/default model</option>
             {models.map((item) => (
@@ -137,13 +165,15 @@ export function TasksPanel({
             value={contextId}
             onChange={(event) => setContextId(event.currentTarget.value)}
             placeholder="Continue an existing task context"
-            disabled={!status?.running || busy}
+            disabled={!status?.enabled || !status.running || busy}
             spellCheck={false}
           />
 
           <button
             type="submit"
-            disabled={!status?.running || busy || !prompt.trim()}
+            disabled={
+              !status?.enabled || !status.running || busy || !prompt.trim()
+            }
           >
             {busy ? "Delegating…" : "Delegate task"}
           </button>
@@ -207,7 +237,7 @@ export function TasksPanel({
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => void onCancel(selectedTask.id)}
+                  onClick={() => setCancelConfirmationOpen(true)}
                 >
                   Cancel task
                 </button>
@@ -248,6 +278,40 @@ export function TasksPanel({
           </article>
         )}
       </section>
+      <Dialog.Root
+        open={cancelConfirmationOpen}
+        onOpenChange={setCancelConfirmationOpen}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="destructive-confirm-dialog">
+            <Dialog.Title>Cancel this delegated task?</Dialog.Title>
+            <Dialog.Description>
+              Bridge will ask the local task service to stop the current work.
+              Partial output may be unavailable.
+            </Dialog.Description>
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button type="button">Keep running</button>
+              </Dialog.Close>
+              <button
+                type="button"
+                disabled={busy || !selectedTask}
+                onClick={() => {
+                  if (!selectedTask) {
+                    return;
+                  }
+                  void onCancel(selectedTask.id).then(() => {
+                    setCancelConfirmationOpen(false);
+                  });
+                }}
+              >
+                Cancel task
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }

@@ -1,11 +1,18 @@
 {
-  "name": "@openai/bridge-codex-desktop",
-  "version": "0.1.0",
+  "name": "@kb01111/bridge-codex-desktop",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --port 1420 --strictPort",
-    "build": "tsc --noEmit && vite build --configLoader runner",
+    "dev": "vite --port 1420 --strictPort --configLoader runner",
+    "version:check": "node scripts/check-version.mjs",
+    "version:test": "node --test scripts/check-version.contract.mjs",
+    "build": "pnpm version:check && tsc --noEmit && vite build --configLoader runner",
+    "build:preview": "pnpm version:check && tsc --noEmit && vite build --mode preview --configLoader runner",
+    "preview:e2e": "pnpm build:preview && vite preview --host 127.0.0.1 --port 1420 --strictPort --configLoader runner",
+    "test": "pnpm version:test && vitest run --configLoader runner",
+    "test:watch": "vitest --configLoader runner",
+    "test:e2e": "pnpm build:preview && playwright test --config playwright.config.ts",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -23,13 +30,18 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.14",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@playwright/test": "^1.57.0",
     "@tauri-apps/cli": "^2.8.4",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
-    "tailwindcss": "^4.1.14",
+    "axe-core": "^4.10.3",
+    "jsdom": "^26.1.0",
     "typescript": "^5.9.3",
-    "vite": "^7.1.9"
+    "vite": "^7.1.9",
+    "vitest": "^3.2.4"
   }
 }

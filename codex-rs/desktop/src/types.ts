@@ -4,36 +4,35 @@ export type ServiceStatus = {
 };
 
 export type ProxyStatus = ServiceStatus & {
-  binaryPath?: string | null;
+  baseUrl: string;
+  authenticated: boolean;
+  responsesApi: boolean;
+  compatibility: "unavailable" | "basic" | "conformant";
+  probedModel?: string | null;
+  experimentalModelCount: number;
 };
 
 export type A2aStatus = ServiceStatus & {
+  enabled: boolean;
   address: string;
+  tokenConfigured: boolean;
+};
+
+export type A2aServerSettings = {
+  enabled: boolean;
+  port: number;
+};
+
+export type A2aTokenProvisioning = {
+  token: string;
+  status: A2aStatus;
 };
 
 export type ProxyModel = {
   id: string;
   object?: string | null;
   ownedBy?: string | null;
-};
-
-export type ChatRole = "system" | "user" | "assistant";
-
-export type ChatMessage = {
-  role: ChatRole;
-  content: string;
-};
-
-export type ChatRequest = {
-  model: string;
-  messages: ChatMessage[];
-};
-
-export type ChatChunk = {
-  requestId: string;
-  delta: string;
-  done: boolean;
-  error?: string | null;
+  classification: "known" | "experimental";
 };
 
 export type BrowserHealth =
@@ -104,10 +103,6 @@ export type DelegateA2aTaskRequest = {
   prompt: string;
   model?: string | null;
   contextId?: string | null;
-};
-
-export type LoginLaunch = {
-  processId: number;
 };
 
 export type ValidationIssue = {

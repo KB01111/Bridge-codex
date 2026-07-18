@@ -12,40 +12,40 @@ type CodeElementProps = {
 };
 
 const components: Components = {
-  p: ({ node: _node, ...props }) => (
+  p: ({ node: _node, ref: _ref, ...props }) => (
     <p className="message-paragraph" {...props} />
   ),
-  h1: ({ node: _node, ...props }) => (
+  h1: ({ node: _node, ref: _ref, ...props }) => (
     <h1 className="message-heading message-heading-1" {...props} />
   ),
-  h2: ({ node: _node, ...props }) => (
+  h2: ({ node: _node, ref: _ref, ...props }) => (
     <h2 className="message-heading message-heading-2" {...props} />
   ),
-  h3: ({ node: _node, ...props }) => (
+  h3: ({ node: _node, ref: _ref, ...props }) => (
     <h3 className="message-heading message-heading-3" {...props} />
   ),
-  h4: ({ node: _node, ...props }) => (
+  h4: ({ node: _node, ref: _ref, ...props }) => (
     <h4 className="message-heading message-heading-4" {...props} />
   ),
-  h5: ({ node: _node, ...props }) => (
+  h5: ({ node: _node, ref: _ref, ...props }) => (
     <h5 className="message-heading message-heading-5" {...props} />
   ),
-  h6: ({ node: _node, ...props }) => (
+  h6: ({ node: _node, ref: _ref, ...props }) => (
     <h6 className="message-heading message-heading-6" {...props} />
   ),
-  ul: ({ node: _node, ...props }) => (
+  ul: ({ node: _node, ref: _ref, ...props }) => (
     <ul className="message-list message-list-unordered" {...props} />
   ),
-  ol: ({ node: _node, ...props }) => (
+  ol: ({ node: _node, ref: _ref, ...props }) => (
     <ol className="message-list message-list-ordered" {...props} />
   ),
-  li: ({ node: _node, ...props }) => (
+  li: ({ node: _node, ref: _ref, ...props }) => (
     <li className="message-list-item" {...props} />
   ),
-  blockquote: ({ node: _node, ...props }) => (
+  blockquote: ({ node: _node, ref: _ref, ...props }) => (
     <blockquote className="message-blockquote" {...props} />
   ),
-  table: ({ node: _node, ...props }) => (
+  table: ({ node: _node, ref: _ref, ...props }) => (
     <div
       className="message-table-scroll"
       role="region"
@@ -55,13 +55,13 @@ const components: Components = {
       <table className="message-table" {...props} />
     </div>
   ),
-  th: ({ node: _node, ...props }) => (
+  th: ({ node: _node, ref: _ref, ...props }) => (
     <th className="message-table-heading" {...props} />
   ),
-  td: ({ node: _node, ...props }) => (
+  td: ({ node: _node, ref: _ref, ...props }) => (
     <td className="message-table-cell" {...props} />
   ),
-  pre: ({ node: _node, children, ...props }) => {
+  pre: ({ node: _node, ref: _ref, children, ...props }) => {
     const child = Children.toArray(children)[0];
     if (isValidElement<CodeElementProps>(child)) {
       const language = /language-([\w-]+)/.exec(
@@ -90,10 +90,10 @@ const components: Components = {
       </pre>
     );
   },
-  code: ({ node: _node, ...props }) => (
+  code: ({ node: _node, ref: _ref, ...props }) => (
     <code className="message-inline-code" {...props} />
   ),
-  a: ({ node: _node, ...props }) => (
+  a: ({ node: _node, ref: _ref, ...props }) => (
     <a
       className="message-link"
       {...props}
@@ -101,7 +101,7 @@ const components: Components = {
       rel="noreferrer noopener"
     />
   ),
-  hr: ({ node: _node, ...props }) => (
+  hr: ({ node: _node, ref: _ref, ...props }) => (
     <hr className="message-divider" {...props} />
   ),
 };
