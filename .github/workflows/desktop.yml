@@ -9,6 +9,9 @@ on:
       - ".github/workflows/desktop.yml"
       - "codex-rs/Cargo.lock"
       - "codex-rs/Cargo.toml"
+      - "codex-rs/app-server/**"
+      - "codex-rs/app-server-client/**"
+      - "codex-rs/app-server-protocol/**"
       - "codex-rs/code-memory/**"
       - "codex-rs/desktop/**"
       - "package.json"
@@ -23,6 +26,9 @@ on:
       - ".github/workflows/desktop.yml"
       - "codex-rs/Cargo.lock"
       - "codex-rs/Cargo.toml"
+      - "codex-rs/app-server/**"
+      - "codex-rs/app-server-client/**"
+      - "codex-rs/app-server-protocol/**"
       - "codex-rs/code-memory/**"
       - "codex-rs/desktop/**"
       - "package.json"
@@ -38,9 +44,9 @@ concurrency:
 
 jobs:
   frontend:
-    name: Frontend typecheck and build
+    name: Frontend test and build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -62,8 +68,26 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Test frontend behavior and accessibility
+        run: pnpm --dir codex-rs/desktop test
+
       - name: Typecheck and build frontend
         run: pnpm --dir codex-rs/desktop build
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir codex-rs/desktop exec playwright install --with-deps chromium
+
+      - name: Test keyboard and responsive browser flows
+        run: pnpm --dir codex-rs/desktop test:e2e
+
+      - name: Upload Playwright evidence
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-playwright
+          path: output/playwright/
+          if-no-files-found: error
+          retention-days: 14
 
   native:
     name: Native smoke (${{ matrix.os }})
@@ -118,11 +142,59 @@ jobs:
 
       - name: Test Rust desktop crate
         working-directory: codex-rs
-        run: just test -p codex-desktop
+        run: |
+          just test -p codex-code-memory
+          just test -p codex-desktop
 
       - name: Build native app without installers
-        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         with:
           projectPath: codex-rs/desktop
           tauriScript: pnpm tauri
           args: --debug --no-bundle
+
+  windows-package:
+    name: Windows installer package
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned installer candidates
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        with:
+          projectPath: codex-rs/desktop
+          tauriScript: pnpm tauri
+          args: --debug --bundles msi,nsis
+
+      - name: Verify both Windows installer formats
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path codex-rs/target/debug/bundle/msi -Filter *.msi -File
+          $nsis = Get-ChildItem -Path codex-rs/target/debug/bundle/nsis -Filter *-setup.exe -File
+          if ($msi.Count -lt 1 -or $nsis.Count -lt 1) {
+            throw "Expected both MSI and NSIS installer candidates."
+          }

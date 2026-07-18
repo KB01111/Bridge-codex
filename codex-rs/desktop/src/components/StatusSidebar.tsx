@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import * as HoverCard from "@radix-ui/react-hover-card";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
 import {
@@ -5,8 +6,11 @@ import {
   ArrowUp,
   Check,
   Copy,
+  GitFork,
+  Pencil,
   RotateCcw,
   Settings2,
+  Square,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -14,14 +18,22 @@ import {
   type FormEvent,
   type KeyboardEvent,
   lazy,
+  memo,
   Suspense,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 
+import { conversationTitleFromPrompt } from "../conversationTitle";
+import type { PendingServerRequest } from "../agentRuntimeReducer";
+import type { RequestId } from "../../../app-server-protocol/schema/typescript/RequestId";
+import type { ServerRequest } from "../../../app-server-protocol/schema/typescript/ServerRequest";
 import type { A2aStatus, BrowserStatus, ProxyStatus } from "../types";
-import type { TraceEntry, UiChatMessage } from "../useBridgeState";
+import type { TraceEntry, UiChatMessage } from "../workbenchTypes";
+import { ServerRequestQueue } from "./ServerRequestQueue";
 
 const MessageContent = lazy(async () => {
   const module = await import("./MessageContent");
@@ -34,25 +46,44 @@ export type StatusSidebarProps = {
   a2aStatus: A2aStatus | null;
   trace: TraceEntry[];
   chat: UiChatMessage[];
+  activeThreadName: string;
+  hasActiveThread: boolean;
+  pendingRequests: PendingServerRequest[];
   sending: boolean;
   selectedModel: string;
   onSend: (prompt: string) => Promise<void>;
   onRetry: () => Promise<void>;
+  onInterrupt: () => Promise<void>;
+  onForkThread: () => Promise<void>;
+  onArchiveThread: () => Promise<void>;
+  onNameThread: (name: string) => Promise<void>;
+  onResolveRequest: (requestId: RequestId, result: unknown) => Promise<void>;
+  onDenyRequest: (requestId: RequestId) => Promise<void>;
+  onExecuteDynamicTool: (
+    request: Extract<ServerRequest, { method: "item/tool/call" }>,
+  ) => Promise<boolean>;
   onClearTrace: () => void;
-  onClearChat: () => void;
-  onOpenRouting: () => void;
+  onOpenRouting: (trigger: HTMLButtonElement) => void;
 };
 
 function StatusIndicator({
   label,
   running,
   detail,
+  disabled = false,
 }: {
   label: string;
   running: boolean | null;
   detail: string;
+  disabled?: boolean;
 }) {
-  const state = running === null ? "unknown" : running ? "online" : "offline";
+  const state = disabled
+    ? "disabled"
+    : running === null
+      ? "unknown"
+      : running
+        ? "online"
+        : "offline";
   return (
     <HoverCard.Root openDelay={250} closeDelay={80}>
       <HoverCard.Trigger asChild>
@@ -90,36 +121,117 @@ function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < 64;
 }
 
-export function StatusSidebar({
+const ChatMessageArticle = memo(function ChatMessageArticle({
+  message,
+  copied,
+  onCopy,
+}: {
+  message: UiChatMessage;
+  copied: boolean;
+  onCopy: (message: UiChatMessage) => void;
+}) {
+  return (
+    <article data-role={message.role}>
+      <header>
+        <span>
+          {message.label ?? (message.role === "user" ? "You" : "Bridge")}
+        </span>
+        {message.content && (
+          <button
+            className="message-copy-button"
+            type="button"
+            aria-label={`Copy ${message.role} message`}
+            onClick={() => onCopy(message)}
+          >
+            {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+            <span>{copied ? "Copied" : "Copy"}</span>
+          </button>
+        )}
+      </header>
+      {message.content && (
+        <Suspense
+          fallback={
+            <pre className="message-content message-fallback">
+              {message.content}
+            </pre>
+          }
+        >
+          <MessageContent content={message.content} />
+        </Suspense>
+      )}
+      {message.streaming && (
+        <p className="streaming-status" role="status">
+          <Sparkles aria-hidden="true" /> Receiving response…
+        </p>
+      )}
+      {message.validation?.containsCode && (
+        <div data-validation={message.validation.valid ? "valid" : "invalid"}>
+          <p>
+            {message.validation.valid
+              ? `${message.validation.blocks.length} code block${message.validation.blocks.length === 1 ? "" : "s"} validated for the sandbox.`
+              : "The generated code does not satisfy the sandbox contract."}
+          </p>
+          {!message.validation.valid && (
+            <ul>
+              {message.validation.issues.map((issue, index) => (
+                <li key={`${issue.code}-${issue.line ?? "unknown"}-${index}`}>
+                  {issue.line ? `Line ${issue.line}: ` : ""}
+                  {issue.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {message.error && <p role="alert">{message.error}</p>}
+    </article>
+  );
+});
+
+export const StatusSidebar = memo(function StatusSidebar({
   proxyStatus,
   browserStatus,
   a2aStatus,
   trace,
   chat,
+  activeThreadName,
+  hasActiveThread,
+  pendingRequests,
   sending,
   selectedModel,
   onSend,
   onRetry,
+  onInterrupt,
+  onForkThread,
+  onArchiveThread,
+  onNameThread,
+  onResolveRequest,
+  onDenyRequest,
+  onExecuteDynamicTool,
   onClearTrace,
-  onClearChat,
   onOpenRouting,
 }: StatusSidebarProps) {
   const [prompt, setPrompt] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [clearConversationOpen, setClearConversationOpen] = useState(false);
+  const [renameThreadOpen, setRenameThreadOpen] = useState(false);
+  const [threadName, setThreadName] = useState("");
+  const [completionAnnouncement, setCompletionAnnouncement] = useState("");
   const traceViewport = useRef<HTMLDivElement>(null);
   const chatViewport = useRef<HTMLDivElement>(null);
   const tracePinned = useRef(true);
   const chatPinned = useRef(true);
   const copyTimer = useRef<number | null>(null);
+  const wasSending = useRef(sending);
   const latestTraceMessage = trace.at(-1)?.message;
   const latestChatContent = chat.at(-1)?.content;
   const modelSelected = Boolean(selectedModel);
   const firstPrompt = chat.find((message) => message.role === "user")?.content;
-  const promptWords = firstPrompt ? firstPrompt.trim().split(/\\s+/) : [];
-  const title = promptWords.length > 0
-    ? `${promptWords.slice(0, 8).join(" ")}${promptWords.length > 8 ? "…" : ""}`
-    : "New task";
+  const title = useMemo(
+    () => activeThreadName || conversationTitleFromPrompt(firstPrompt),
+    [activeThreadName, firstPrompt],
+  );
 
   useEffect(() => {
     if (tracePinned.current && traceViewport.current) {
@@ -133,6 +245,19 @@ export function StatusSidebar({
     }
   }, [chat.length, latestChatContent, sending]);
 
+  useEffect(() => {
+    if (!wasSending.current && sending) {
+      setCompletionAnnouncement("Bridge started responding.");
+    } else if (wasSending.current && !sending) {
+      setCompletionAnnouncement(
+        chat.at(-1)?.error
+          ? "Bridge response failed."
+          : "Bridge response complete.",
+      );
+    }
+    wasSending.current = sending;
+  }, [chat, sending]);
+
   useEffect(
     () => () => {
       if (copyTimer.current !== null) {
@@ -145,7 +270,7 @@ export function StatusSidebar({
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const content = prompt.trim();
-    if (!content || sending || !modelSelected) {
+    if (!content || !modelSelected) {
       return;
     }
     setPrompt("");
@@ -164,7 +289,7 @@ export function StatusSidebar({
     }
   }
 
-  async function copyMessage(message: UiChatMessage) {
+  const copyMessage = useCallback(async (message: UiChatMessage) => {
     if (!message.content) {
       return;
     }
@@ -184,7 +309,7 @@ export function StatusSidebar({
         error instanceof Error ? error.message : "Clipboard access failed",
       );
     }
-  }
+  }, []);
 
   return (
     <main
@@ -220,8 +345,11 @@ export function StatusSidebar({
             <StatusIndicator
               label="A2A"
               running={a2aStatus?.running ?? null}
+              disabled={a2aStatus ? !a2aStatus.enabled : false}
               detail={
-                a2aStatus?.running
+                a2aStatus && !a2aStatus.enabled
+                  ? "Task delegation is disabled in this build's security configuration."
+                  : a2aStatus?.running
                   ? `Task delegation is available at ${a2aStatus.address}.`
                   : (a2aStatus?.error ?? "Waiting for the local A2A server.")
               }
@@ -241,15 +369,104 @@ export function StatusSidebar({
           <button
             className="icon-button"
             type="button"
-            title="Clear this conversation"
-            aria-label="Clear this conversation"
-            disabled={sending || chat.length === 0}
-            onClick={onClearChat}
+            title="Fork this thread"
+            aria-label="Fork this thread"
+            disabled={sending || !hasActiveThread}
+            onClick={() => void onForkThread()}
+          >
+            <GitFork aria-hidden="true" />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title="Rename this thread"
+            aria-label="Rename this thread"
+            disabled={!hasActiveThread}
+            onClick={() => {
+              setThreadName(activeThreadName || title);
+              setRenameThreadOpen(true);
+            }}
+          >
+            <Pencil aria-hidden="true" />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title="Archive this thread"
+            aria-label="Archive this thread"
+            disabled={sending || !hasActiveThread}
+            onClick={() => setClearConversationOpen(true)}
           >
             <Trash2 aria-hidden="true" />
           </button>
         </div>
       </header>
+
+      <Dialog.Root
+        open={clearConversationOpen}
+        onOpenChange={setClearConversationOpen}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="destructive-confirm-dialog">
+            <Dialog.Title>Archive this thread?</Dialog.Title>
+            <Dialog.Description>
+              The app server will move this thread out of the active list. Its
+              persisted rollout remains managed by Codex.
+            </Dialog.Description>
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button type="button">Keep thread</button>
+              </Dialog.Close>
+              <button
+                type="button"
+                onClick={() => {
+                  void onArchiveThread();
+                  setClearConversationOpen(false);
+                }}
+              >
+                Archive thread
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={renameThreadOpen} onOpenChange={setRenameThreadOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="destructive-confirm-dialog">
+            <Dialog.Title>Rename thread</Dialog.Title>
+            <Dialog.Description>
+              Choose the title shown in the Codex thread list.
+            </Dialog.Description>
+            <label>
+              Thread name
+              <input
+                autoFocus
+                type="text"
+                value={threadName}
+                onChange={(event) => setThreadName(event.currentTarget.value)}
+              />
+            </label>
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button type="button">Cancel</button>
+              </Dialog.Close>
+              <button
+                type="button"
+                disabled={!threadName.trim()}
+                onClick={() => {
+                  void onNameThread(threadName);
+                  setRenameThreadOpen(false);
+                }}
+              >
+                Save name
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <section className="agent-chat" aria-label="Conversation">
         <ScrollArea.Root className="chat-scroll-area" type="auto">
@@ -260,7 +477,13 @@ export function StatusSidebar({
               chatPinned.current = isNearBottom(event.currentTarget);
             }}
           >
-            <div className="chat-message-list">
+            <div
+              className="chat-message-list"
+              role="log"
+              aria-label="Conversation messages"
+              aria-live="polite"
+              aria-relevant="additions"
+            >
               {chat.length === 0 ? (
                 <div className="thread-empty-state">
                   <span className="bridge-mark" aria-hidden="true">
@@ -300,70 +523,12 @@ export function StatusSidebar({
                 </div>
               ) : (
                 chat.map((message) => (
-                  <article key={message.id} data-role={message.role}>
-                    <header>
-                      <span>{message.role === "user" ? "You" : "Bridge"}</span>
-                      {message.content && (
-                        <button
-                          className="message-copy-button"
-                          type="button"
-                          aria-label={`Copy ${message.role} message`}
-                          onClick={() => void copyMessage(message)}
-                        >
-                          {copiedMessageId === message.id ? (
-                            <Check aria-hidden="true" />
-                          ) : (
-                            <Copy aria-hidden="true" />
-                          )}
-                          <span>
-                            {copiedMessageId === message.id ? "Copied" : "Copy"}
-                          </span>
-                        </button>
-                      )}
-                    </header>
-                    {message.content && (
-                      <Suspense
-                        fallback={
-                          <pre className="message-content message-fallback">
-                            {message.content}
-                          </pre>
-                        }
-                      >
-                        <MessageContent content={message.content} />
-                      </Suspense>
-                    )}
-                    {message.streaming && (
-                      <p className="streaming-status" role="status">
-                        <Sparkles aria-hidden="true" /> Receiving response…
-                      </p>
-                    )}
-                    {message.validation?.containsCode && (
-                      <div
-                        data-validation={
-                          message.validation.valid ? "valid" : "invalid"
-                        }
-                      >
-                        <p>
-                          {message.validation.valid
-                            ? `${message.validation.blocks.length} code block${message.validation.blocks.length === 1 ? "" : "s"} validated for the sandbox.`
-                            : "The generated code does not satisfy the sandbox contract."}
-                        </p>
-                        {!message.validation.valid && (
-                          <ul>
-                            {message.validation.issues.map((issue, index) => (
-                              <li
-                                key={`${issue.code}-${issue.line ?? "unknown"}-${index}`}
-                              >
-                                {issue.line ? `Line ${issue.line}: ` : ""}
-                                {issue.message}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    )}
-                    {message.error && <p role="alert">{message.error}</p>}
-                  </article>
+                  <ChatMessageArticle
+                    key={message.id}
+                    message={message}
+                    copied={copiedMessageId === message.id}
+                    onCopy={copyMessage}
+                  />
                 ))
               )}
             </div>
@@ -375,7 +540,17 @@ export function StatusSidebar({
         {copyError && (
           <p role="alert">Could not copy the response: {copyError}</p>
         )}
+        <p className="visually-hidden" role="status" aria-live="polite">
+          {completionAnnouncement}
+        </p>
       </section>
+
+      <ServerRequestQueue
+        requests={pendingRequests}
+        onResolve={onResolveRequest}
+        onDeny={onDenyRequest}
+        onExecuteDynamicTool={onExecuteDynamicTool}
+      />
 
       <footer className="thread-footer">
         <details className="execution-trace">
@@ -440,14 +615,14 @@ export function StatusSidebar({
                 ? "Ask Bridge to work on something…"
                 : "Choose a model to begin"
             }
-            disabled={!modelSelected || sending}
+            disabled={!modelSelected}
             rows={3}
           />
           <div className="composer-toolbar">
             <button
               className="model-pill"
               type="button"
-              onClick={onOpenRouting}
+              onClick={(event) => onOpenRouting(event.currentTarget)}
             >
               <Settings2 aria-hidden="true" />
               <span>{selectedModel || "Choose model"}</span>
@@ -455,14 +630,25 @@ export function StatusSidebar({
             <div className="composer-status">
               <span role="status" aria-live="polite">
                 {sending
-                  ? "Bridge is working"
+                  ? "Send to steer the active turn"
                   : "Enter to send · Shift+Enter for a new line"}
               </span>
+              {sending && (
+                <button
+                  className="interrupt-button"
+                  type="button"
+                  aria-label="Interrupt active turn"
+                  title="Interrupt active turn"
+                  onClick={() => void onInterrupt()}
+                >
+                  <Square aria-hidden="true" />
+                </button>
+              )}
               <button
                 className="send-button"
                 type="submit"
-                aria-label={sending ? "Bridge is working" : "Send message"}
-                disabled={!prompt.trim() || !modelSelected || sending}
+                aria-label={sending ? "Steer active turn" : "Send message"}
+                disabled={!prompt.trim() || !modelSelected}
               >
                 <ArrowUp aria-hidden="true" />
               </button>
@@ -472,4 +658,4 @@ export function StatusSidebar({
       </footer>
     </main>
   );
-}
+});

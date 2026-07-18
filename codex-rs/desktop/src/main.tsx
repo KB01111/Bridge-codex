@@ -4,7 +4,6 @@ import "@fontsource-variable/hanken-grotesk";
 
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import "./styles.css";
 import "./codex-shell.css";
 
 const root = document.getElementById("root");

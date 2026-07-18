@@ -1,78 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { backend } from "./backend";
+import { publishBrowserFrame } from "./browserFrameStore";
+import type { BridgeHookContext } from "./bridgeHookContext";
 import type {
   A2aStatus,
-  A2aTask,
-  BrowserFrame,
   BrowserStatus,
-  ChatChunk,
-  ChatMessage,
-  CodeMemorySearchResult,
   CodeMemoryStatus,
   CodePolicyStatus,
-  CodeValidation,
-  DelegateA2aTaskRequest,
   DesktopStatus,
-  LoginLaunch,
   ProxyModel,
   ProxyStatus,
-  SandboxValidationEvent,
 } from "./types";
+import { useA2aBridgeState } from "./useA2aBridgeState";
+import { useBrowserBridgeState } from "./useBrowserBridgeState";
+import { useCodeMemoryBridgeState } from "./useCodeMemoryBridgeState";
+import type { TraceEntry } from "./workbenchTypes";
 
-const LEGACY_SESSION_STORAGE_KEY = "bridge-codex.session.v1";
-const WORKSPACE_STORAGE_KEY = "bridge-codex.workspace.v2";
 const MAX_TRACE_ENTRIES = 200;
 const MAX_TRACE_MESSAGE_LENGTH = 4_096;
-const MAX_CHAT_MESSAGES = 96;
-const MAX_CHAT_STATE_LENGTH = 2 * 1024 * 1024;
-const MAX_PERSISTED_CHAT_LENGTH = 512 * 1024;
-const MAX_PERSISTED_WORKSPACE_LENGTH = 2 * 1024 * 1024;
-const MAX_CONVERSATIONS = 24;
-const MAX_CHAT_REQUEST_LENGTH = 60 * 1024;
-const MAX_CHAT_REQUEST_MESSAGES = 120;
-const LOGIN_POLL_ATTEMPTS = 60;
-const LOGIN_POLL_INTERVAL_MS = 2_000;
-
-export type TraceEntry = {
-  id: string;
-  timestamp: Date;
-  kind: "info" | "success" | "error";
-  message: string;
-};
-
-export type UiChatMessage = ChatMessage & {
-  id: string;
-  streaming?: boolean;
-  error?: string | null;
-  validation?: CodeValidation;
-};
-
-export type ConversationSummary = {
-  id: string;
-  title: string;
-  updatedAt: string;
-  messageCount: number;
-};
-
-type ConversationThread = {
-  id: string;
-  updatedAt: string;
-  chat: UiChatMessage[];
-};
-
-export type LoginState =
-  | { phase: "idle" }
-  | { phase: "launching" }
-  | { phase: "launched"; launch: LoginLaunch }
-  | { phase: "error"; error: string };
-
-export type LoginVerificationState =
-  | { phase: "idle" }
-  | { phase: "checking"; attempt: number }
-  | { phase: "verified"; modelCount: number; verifiedAt: string }
-  | { phase: "pending"; error: string };
-
 export type BridgeLoadingState = {
   initial: boolean;
   proxy: boolean;
@@ -81,8 +27,6 @@ export type BridgeLoadingState = {
   desktop: boolean;
   a2a: boolean;
   codeMemory: boolean;
-  chat: boolean;
-  login: boolean;
 };
 
 export type BridgeErrorState = {
@@ -93,8 +37,6 @@ export type BridgeErrorState = {
   desktop: string | null;
   a2a: string | null;
   codeMemory: string | null;
-  chat: string | null;
-  login: string | null;
 };
 
 type LoadingResource = Exclude<keyof BridgeLoadingState, "initial">;
@@ -103,9 +45,6 @@ type ErrorResource = Exclude<keyof BridgeErrorState, "initialization">;
 type BridgeEventSubscriber = {
   proxyStatus: (status: ProxyStatus) => void;
   a2aStatus: (status: A2aStatus) => void;
-  chatChunk: (chunk: ChatChunk) => void;
-  sandboxValidation: (event: SandboxValidationEvent) => void;
-  browserFrame: (frame: BrowserFrame) => void;
   codeMemoryStatus: (status: CodeMemoryStatus) => void;
   bridgeError: (error: unknown) => void;
 };
@@ -119,18 +58,10 @@ type InitialSnapshot = {
   codeMemory: PromiseSettledResult<CodeMemoryStatus>;
 };
 
-type PersistedWorkspace = {
-  selectedModel: string;
-  trace: TraceEntry[];
-  activeConversationId: string;
-  conversations: ConversationThread[];
-};
-
 const eventSubscribers = new Set<BridgeEventSubscriber>();
 let eventBridgePromise: Promise<void> | null = null;
 let initialSnapshotPromise: Promise<InitialSnapshot> | null = null;
 let modelRequestPromise: Promise<ProxyModel[]> | null = null;
-let taskListRequestPromise: Promise<A2aTask[]> | null = null;
 let localId = 0;
 
 function nextId(prefix: string): string {
@@ -175,278 +106,8 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, end)}…`;
 }
 
-function utf8Length(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
 function boundedTrace(entries: TraceEntry[]): TraceEntry[] {
   return entries.slice(-MAX_TRACE_ENTRIES);
-}
-
-function boundedChat(
-  messages: UiChatMessage[],
-  maxLength = MAX_CHAT_STATE_LENGTH,
-): UiChatMessage[] {
-  const retained: UiChatMessage[] = [];
-  let length = 0;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message) {
-      continue;
-    }
-    const nextLength =
-      length + message.content.length + (message.error?.length ?? 0);
-    if (retained.length >= MAX_CHAT_MESSAGES || nextLength > maxLength) {
-      break;
-    }
-    retained.push(message);
-    length = nextLength;
-  }
-  retained.reverse();
-  return retained;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function createConversation(chat: UiChatMessage[] = []): ConversationThread {
-  return {
-    id: nextId("conversation"),
-    updatedAt: new Date().toISOString(),
-    chat: boundedChat(chat, MAX_PERSISTED_CHAT_LENGTH),
-  };
-}
-
-function conversationTitle(chat: UiChatMessage[]): string {
-  const firstPrompt = chat.find((message) => message.role === "user")?.content;
-  if (!firstPrompt?.trim()) {
-    return "New task";
-  }
-  const cleaned = firstPrompt.slice(0, 100).trim().replace(/\s+/gu, " ");
-}
-
-function parseTrace(value: unknown): TraceEntry[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return boundedTrace(
-    value.flatMap((candidate): TraceEntry[] => {
-      if (
-        !isRecord(candidate) ||
-        typeof candidate.id !== "string" ||
-        typeof candidate.timestamp !== "string" ||
-        typeof candidate.message !== "string" ||
-        !["info", "success", "error"].includes(String(candidate.kind))
-      ) {
-        return [];
-      }
-      const timestamp = new Date(candidate.timestamp);
-      if (Number.isNaN(timestamp.getTime())) {
-        return [];
-      }
-      return [
-        {
-          id: candidate.id,
-          timestamp,
-          kind: candidate.kind as TraceEntry["kind"],
-          message: truncateText(candidate.message, MAX_TRACE_MESSAGE_LENGTH),
-        },
-      ];
-    }),
-  );
-}
-
-function parseChat(value: unknown): UiChatMessage[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return boundedChat(
-    value.flatMap((candidate): UiChatMessage[] => {
-      if (
-        !isRecord(candidate) ||
-        typeof candidate.id !== "string" ||
-        typeof candidate.content !== "string" ||
-        !["system", "user", "assistant"].includes(String(candidate.role))
-      ) {
-        return [];
-      }
-      const interrupted = candidate.streaming === true;
-      return [
-        {
-          id: candidate.id,
-          role: candidate.role as ChatMessage["role"],
-          content: candidate.content,
-          streaming: false,
-          error: interrupted
-            ? "The previous response stream was interrupted when the app closed."
-            : typeof candidate.error === "string"
-              ? candidate.error
-              : null,
-        },
-      ];
-    }),
-    MAX_PERSISTED_CHAT_LENGTH,
-  );
-}
-
-function parseConversations(value: unknown): ConversationThread[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const ids = new Set<string>();
-  return value
-    .flatMap((candidate): ConversationThread[] => {
-      if (
-        !isRecord(candidate) ||
-        typeof candidate.id !== "string" ||
-        !candidate.id ||
-        ids.has(candidate.id) ||
-        typeof candidate.updatedAt !== "string"
-      ) {
-        return [];
-      }
-      const updatedAt = new Date(candidate.updatedAt);
-      if (Number.isNaN(updatedAt.getTime())) {
-        return [];
-      }
-      ids.add(candidate.id);
-      return [
-        {
-          id: candidate.id,
-          updatedAt: updatedAt.toISOString(),
-          chat: parseChat(candidate.chat),
-        },
-      ];
-    })
-    .slice(0, MAX_CONVERSATIONS);
-}
-
-function readPersistedValue(key: string): unknown {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function loadPersistedWorkspace(): PersistedWorkspace {
-  const emptyConversation = createConversation();
-  const empty: PersistedWorkspace = {
-    selectedModel: "",
-    trace: [],
-    activeConversationId: emptyConversation.id,
-    conversations: [emptyConversation],
-  };
-  if (typeof window === "undefined") {
-    return empty;
-  }
-
-  const value = readPersistedValue(WORKSPACE_STORAGE_KEY);
-  if (isRecord(value)) {
-    const conversations = parseConversations(value.conversations);
-    if (conversations.length > 0) {
-      const requestedActiveId =
-        typeof value.activeConversationId === "string"
-          ? value.activeConversationId
-          : "";
-      const activeConversationId = conversations.some(
-        (conversation) => conversation.id === requestedActiveId,
-      )
-        ? requestedActiveId
-        : conversations[0]?.id;
-      if (activeConversationId) {
-        return {
-          selectedModel:
-            typeof value.selectedModel === "string"
-              ? value.selectedModel.slice(0, 256)
-              : "",
-          trace: parseTrace(value.trace),
-          activeConversationId,
-          conversations,
-        };
-      }
-    }
-  }
-
-  const legacy = readPersistedValue(LEGACY_SESSION_STORAGE_KEY);
-  if (!isRecord(legacy)) {
-    return empty;
-  }
-  const migratedConversation = createConversation(parseChat(legacy.chat));
-  return {
-    selectedModel:
-      typeof legacy.selectedModel === "string"
-        ? legacy.selectedModel.slice(0, 256)
-        : "",
-    trace: parseTrace(legacy.trace),
-    activeConversationId: migratedConversation.id,
-    conversations: [migratedConversation],
-  };
-}
-
-function serializableConversation(conversation: ConversationThread) {
-  return {
-    id: conversation.id,
-    updatedAt: conversation.updatedAt,
-    chat: boundedChat(conversation.chat, MAX_PERSISTED_CHAT_LENGTH).map(
-      ({ id, role, content, streaming, error }) => ({
-        id,
-        role,
-        content,
-        streaming,
-        error,
-      }),
-    ),
-  };
-}
-
-function persistWorkspace(workspace: PersistedWorkspace): void {
-  try {
-    const orderedConversations = [
-      ...workspace.conversations.filter(
-        (conversation) => conversation.id === workspace.activeConversationId,
-      ),
-      ...workspace.conversations.filter(
-        (conversation) => conversation.id !== workspace.activeConversationId,
-      ),
-    ].slice(0, MAX_CONVERSATIONS);
-    const trace = boundedTrace(workspace.trace).map((entry) => ({
-      ...entry,
-      timestamp: entry.timestamp.toISOString(),
-    }));
-    const conversations: ReturnType<typeof serializableConversation>[] = [];
-    for (const conversation of orderedConversations) {
-      const serializedConversation = serializableConversation(conversation);
-      const candidate = [...conversations, serializedConversation];
-      const payload = JSON.stringify({
-        selectedModel: workspace.selectedModel,
-        trace,
-        activeConversationId: workspace.activeConversationId,
-        conversations: candidate,
-      });
-      if (
-        payload.length > MAX_PERSISTED_WORKSPACE_LENGTH &&
-        conversations.length > 0
-      ) {
-        break;
-      }
-      conversations.push(serializedConversation);
-    }
-    window.localStorage.setItem(
-      WORKSPACE_STORAGE_KEY,
-      JSON.stringify({
-        selectedModel: workspace.selectedModel,
-        trace,
-        activeConversationId: workspace.activeConversationId,
-        conversations,
-      }),
-    );
-    window.localStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
-  } catch {
-    // Persistence is a best-effort convenience; Tauri may disable web storage.
-  }
 }
 
 function requestInitialSnapshot(): Promise<InitialSnapshot> {
@@ -484,20 +145,6 @@ function fetchModelsShared(): Promise<ProxyModel[]> {
   return modelRequestPromise;
 }
 
-function fetchTasksShared(): Promise<A2aTask[]> {
-  if (!taskListRequestPromise) {
-    const request = backend.listA2aTasks();
-    taskListRequestPromise = request;
-    const clearRequest = () => {
-      if (taskListRequestPromise === request) {
-        taskListRequestPromise = null;
-      }
-    };
-    void request.then(clearRequest, clearRequest);
-  }
-  return taskListRequestPromise;
-}
-
 function emitToSubscribers<Key extends keyof BridgeEventSubscriber>(
   key: Key,
   payload: Parameters<BridgeEventSubscriber[Key]>[0],
@@ -515,13 +162,7 @@ function ensureEventBridge(): Promise<void> {
         emitToSubscribers("proxyStatus", status),
       ),
       backend.onA2aStatus((status) => emitToSubscribers("a2aStatus", status)),
-      backend.onChatChunk((chunk) => emitToSubscribers("chatChunk", chunk)),
-      backend.onSandboxValidation((event) =>
-        emitToSubscribers("sandboxValidation", event),
-      ),
-      backend.onBrowserFrame((frame) =>
-        emitToSubscribers("browserFrame", frame),
-      ),
+      backend.onBrowserFrame(publishBrowserFrame),
       backend.onCodeMemoryStatus((status) =>
         emitToSubscribers("codeMemoryStatus", status),
       ),
@@ -545,46 +186,6 @@ function subscribeBridgeEvents(subscriber: BridgeEventSubscriber): () => void {
   };
 }
 
-function requestHistory(
-  messages: UiChatMessage[],
-  maxLength: number,
-): ChatMessage[] {
-  const history: ChatMessage[] = [];
-  let totalLength = 0;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (
-      !message ||
-      !message.content.trim() ||
-      message.error ||
-      message.streaming
-    ) {
-      continue;
-    }
-    const messageLength = utf8Length(message.content);
-    if (
-      history.length >= MAX_CHAT_REQUEST_MESSAGES ||
-      totalLength + messageLength > maxLength
-    ) {
-      break;
-    }
-    history.push({ role: message.role, content: message.content });
-    totalLength += messageLength;
-  }
-  history.reverse();
-  return history;
-}
-
-function replaceTask(tasks: A2aTask[], task: A2aTask): A2aTask[] {
-  const index = tasks.findIndex((candidate) => candidate.id === task.id);
-  if (index < 0) {
-    return [task, ...tasks];
-  }
-  return tasks.map((candidate) =>
-    candidate.id === task.id ? task : candidate,
-  );
-}
-
 const initialLoading: BridgeLoadingState = {
   initial: true,
   proxy: false,
@@ -593,8 +194,6 @@ const initialLoading: BridgeLoadingState = {
   desktop: false,
   a2a: false,
   codeMemory: false,
-  chat: false,
-  login: false,
 };
 
 const initialErrors: BridgeErrorState = {
@@ -605,97 +204,23 @@ const initialErrors: BridgeErrorState = {
   desktop: null,
   a2a: null,
   codeMemory: null,
-  chat: null,
-  login: null,
 };
 
 export function useBridgeState() {
-  const [persisted] = useState(loadPersistedWorkspace);
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
-  const [browserStatus, setBrowserStatus] = useState<BrowserStatus | null>(
-    null,
-  );
-  const [browserFrame, setBrowserFrame] = useState<BrowserFrame | null>(null);
+  const probedModelRef = useRef<string | null>(null);
   const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(
     null,
   );
-  const [a2aStatus, setA2aStatus] = useState<A2aStatus | null>(null);
-  const [a2aTasks, setA2aTasks] = useState<A2aTask[]>([]);
-  const [selectedA2aTask, setSelectedA2aTask] = useState<A2aTask | null>(null);
   const [codePolicyStatus, setCodePolicyStatus] =
     useState<CodePolicyStatus | null>(null);
-  const [codeMemoryStatus, setCodeMemoryStatus] =
-    useState<CodeMemoryStatus | null>(null);
-  const [codeMemoryResults, setCodeMemoryResults] = useState<
-    CodeMemorySearchResult[]
-  >([]);
-  const [codeMemoryWarnings, setCodeMemoryWarnings] = useState<string[]>([]);
   const [models, setModels] = useState<ProxyModel[]>([]);
-  const [selectedModel, setSelectedModel] = useState(persisted.selectedModel);
-  const [trace, setTrace] = useState<TraceEntry[]>(persisted.trace);
-  const [activeConversationId, setActiveConversationId] = useState(
-    persisted.activeConversationId,
-  );
-  const [conversations, setConversations] = useState(persisted.conversations);
-  const [chat, setChat] = useState<UiChatMessage[]>(
-    () =>
-      persisted.conversations.find(
-        (conversation) => conversation.id === persisted.activeConversationId,
-      )?.chat ?? [],
-  );
-  const [sending, setSending] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [trace, setTrace] = useState<TraceEntry[]>([]);
   const [loading, setLoading] = useState<BridgeLoadingState>(initialLoading);
   const [errors, setErrors] = useState<BridgeErrorState>(initialErrors);
-  const [loginState, setLoginState] = useState<LoginState>({ phase: "idle" });
-  const [loginVerification, setLoginVerification] =
-    useState<LoginVerificationState>({ phase: "idle" });
 
-  const sendingRef = useRef(false);
-  const browserOperationRef = useRef(false);
   const desktopOperationRef = useRef(false);
-  const a2aOperationRef = useRef(false);
-  const a2aMutationGenerationRef = useRef(0);
-  const codeMemoryOperationRef = useRef(false);
-  const loginVerificationTokenRef = useRef(0);
-  const pendingBrowserFrameRef = useRef<BrowserFrame | null>(null);
-  const browserFrameRequestRef = useRef<number | null>(null);
-  const lastBrowserSequenceRef = useRef(0);
-  const a2aTasksRef = useRef(a2aTasks);
-
-  useEffect(() => {
-    a2aTasksRef.current = a2aTasks;
-  }, [a2aTasks]);
-
-  useEffect(() => {
-    setConversations((current) => {
-      const active = current.find(
-        (conversation) => conversation.id === activeConversationId,
-      );
-      if (!active) {
-        const created = {
-          id: activeConversationId,
-          updatedAt: new Date().toISOString(),
-          chat,
-        };
-        return [created, ...current].slice(0, MAX_CONVERSATIONS);
-      }
-      if (active.chat === chat && current[0]?.id === activeConversationId) {
-        return current;
-      }
-      const updated = {
-        ...active,
-        updatedAt:
-          active.chat === chat ? active.updatedAt : new Date().toISOString(),
-        chat,
-      };
-      return [
-        updated,
-        ...current.filter(
-          (conversation) => conversation.id !== activeConversationId,
-        ),
-      ].slice(0, MAX_CONVERSATIONS);
-    });
-  }, [activeConversationId, chat]);
 
   const setResourceLoading = useCallback(
     (resource: LoadingResource, value: boolean) => {
@@ -743,12 +268,27 @@ export function useBridgeState() {
 
   const applyModels = useCallback((nextModels: ProxyModel[]) => {
     setModels(nextModels);
-    setSelectedModel((current) =>
-      nextModels.some((model) => model.id === current)
-        ? current
-        : (nextModels[0]?.id ?? ""),
+    const probedModel = probedModelRef.current;
+    setSelectedModel(
+      nextModels.some((model) => model.id === probedModel)
+        ? (probedModel ?? "")
+        : "",
     );
   }, []);
+
+  const selectModel = useCallback(
+    (model: string) => {
+      if (model !== probedModelRef.current) {
+        const message = `${model} is unavailable until it passes the Responses and tool-call conformance probe.`;
+        setResourceError("models", message);
+        appendTrace(message, "error");
+        return;
+      }
+      setResourceError("models", null);
+      setSelectedModel(model);
+    },
+    [appendTrace, setResourceError],
+  );
 
   const refreshModels = useCallback(async () => {
     setResourceLoading("models", true);
@@ -769,101 +309,38 @@ export function useBridgeState() {
     }
   }, [appendTrace, applyModels, setResourceError, setResourceLoading]);
 
-  const handleChatChunk = useCallback(
-    (chunk: ChatChunk) => {
-      setChat((current) => {
-        const index = current.findIndex(
-          (message) => message.id === chunk.requestId,
-        );
-        const next =
-          index < 0
-            ? [
-                ...current,
-                {
-                  id: chunk.requestId,
-                  role: "assistant" as const,
-                  content: chunk.delta,
-                  streaming: !chunk.done,
-                  error: chunk.error,
-                },
-              ]
-            : current.map((message, messageIndex) =>
-                messageIndex === index
-                  ? {
-                      ...message,
-                      content: message.content + chunk.delta,
-                      streaming: !chunk.done,
-                      error: chunk.error,
-                    }
-                  : message,
-              );
-        return boundedChat(next);
-      });
-      if (chunk.done) {
-        sendingRef.current = false;
-        setSending(false);
-        setResourceLoading("chat", false);
-        setResourceError("chat", chunk.error ?? null);
-        appendTrace(
-          chunk.error
-            ? `Model request failed: ${chunk.error}`
-            : "Model response completed",
-          chunk.error ? "error" : "success",
-        );
-      }
-    },
+  const browserContext = useMemo<BridgeHookContext>(
+    () => ({
+      appendTrace,
+      setBusy: (busy) => setResourceLoading("browser", busy),
+      setError: (error) => setResourceError("browser", error),
+    }),
     [appendTrace, setResourceError, setResourceLoading],
   );
-
-  const handleSandboxValidation = useCallback(
-    ({ requestId, validation }: SandboxValidationEvent) => {
-      setChat((current) =>
-        current.map((message) =>
-          message.id === requestId ? { ...message, validation } : message,
-        ),
-      );
-      if (validation.containsCode) {
-        appendTrace(
-          validation.valid
-            ? `Tree-sitter validated ${validation.blocks.length} sandbox code block${validation.blocks.length === 1 ? "" : "s"}`
-            : `Sandbox validation found ${validation.issues.length} issue${validation.issues.length === 1 ? "" : "s"}`,
-          validation.valid ? "success" : "error",
-        );
-      }
-    },
-    [appendTrace],
+  const a2aContext = useMemo<BridgeHookContext>(
+    () => ({
+      appendTrace,
+      setBusy: (busy) => setResourceLoading("a2a", busy),
+      setError: (error) => setResourceError("a2a", error),
+    }),
+    [appendTrace, setResourceError, setResourceLoading],
   );
-
-  const handleBrowserFrame = useCallback((frame: BrowserFrame) => {
-    if (frame.sequence <= lastBrowserSequenceRef.current) {
-      return;
-    }
-    pendingBrowserFrameRef.current = frame;
-    if (browserFrameRequestRef.current !== null) {
-      return;
-    }
-    browserFrameRequestRef.current = window.requestAnimationFrame(() => {
-      browserFrameRequestRef.current = null;
-      const pending = pendingBrowserFrameRef.current;
-      if (!pending || pending.sequence <= lastBrowserSequenceRef.current) {
-        return;
-      }
-      lastBrowserSequenceRef.current = pending.sequence;
-      setBrowserFrame(pending);
-      setBrowserStatus((current) => ({
-        running: true,
-        url: pending.url,
-        viewportWidth: pending.width,
-        viewportHeight: pending.height,
-        health: current?.health === "degraded" ? "degraded" : "running",
-        error: current?.health === "degraded" ? current.error : null,
-      }));
-    });
-  }, []);
+  const codeMemoryContext = useMemo<BridgeHookContext>(
+    () => ({
+      appendTrace,
+      setBusy: (busy) => setResourceLoading("codeMemory", busy),
+      setError: (error) => setResourceError("codeMemory", error),
+    }),
+    [appendTrace, setResourceError, setResourceLoading],
+  );
+  const browser = useBrowserBridgeState(browserContext);
+  const a2a = useA2aBridgeState(a2aContext, selectedModel);
+  const codeMemory = useCodeMemoryBridgeState(codeMemoryContext);
 
   useEffect(() => {
     const unsubscribe = subscribeBridgeEvents({
       proxyStatus: (status) => {
+        probedModelRef.current = status.probedModel ?? null;
         setProxyStatus(status);
         setResourceError("proxy", status.error ?? null);
         appendTrace(
@@ -877,8 +354,7 @@ export function useBridgeState() {
         }
       },
       a2aStatus: (status) => {
-        setA2aStatus(status);
-        setResourceError("a2a", status.error ?? null);
+        a2a.applyStatus(status);
         appendTrace(
           status.running
             ? `A2A server is listening on ${status.address}`
@@ -886,12 +362,8 @@ export function useBridgeState() {
           status.running ? "success" : "error",
         );
       },
-      chatChunk: handleChatChunk,
-      sandboxValidation: handleSandboxValidation,
-      browserFrame: handleBrowserFrame,
       codeMemoryStatus: (status) => {
-        setCodeMemoryStatus(status);
-        setResourceError("codeMemory", status.error ?? null);
+        codeMemory.applyStatus(status);
       },
       bridgeError: (error) => {
         const message = errorMessage(error);
@@ -899,20 +371,12 @@ export function useBridgeState() {
         appendTrace(`Tauri event bridge failed: ${message}`, "error");
       },
     });
-    return () => {
-      unsubscribe();
-      if (browserFrameRequestRef.current !== null) {
-        window.cancelAnimationFrame(browserFrameRequestRef.current);
-        browserFrameRequestRef.current = null;
-      }
-    };
+    return unsubscribe;
   }, [
     appendTrace,
-    handleBrowserFrame,
-    handleChatChunk,
-    handleSandboxValidation,
+    a2a.applyStatus,
+    codeMemory.applyStatus,
     refreshModels,
-    setResourceError,
   ]);
 
   const applyInitialSnapshot = useCallback(
@@ -930,6 +394,7 @@ export function useBridgeState() {
       };
 
       if (snapshot.proxy.status === "fulfilled") {
+        probedModelRef.current = snapshot.proxy.value.probedModel ?? null;
         setProxyStatus(snapshot.proxy.value);
         setResourceError("proxy", snapshot.proxy.value.error ?? null);
         if (snapshot.proxy.value.running) {
@@ -939,8 +404,7 @@ export function useBridgeState() {
         applyFailure("proxy", "Proxy status", snapshot.proxy.reason);
       }
       if (snapshot.browser.status === "fulfilled") {
-        setBrowserStatus(snapshot.browser.value);
-        setResourceError("browser", snapshot.browser.value.error ?? null);
+        browser.applyStatus(snapshot.browser.value);
       } else {
         applyFailure("browser", "Browser status", snapshot.browser.reason);
       }
@@ -951,8 +415,7 @@ export function useBridgeState() {
         applyFailure("desktop", "Desktop status", snapshot.desktop.reason);
       }
       if (snapshot.a2a.status === "fulfilled") {
-        setA2aStatus(snapshot.a2a.value);
-        setResourceError("a2a", snapshot.a2a.value.error ?? null);
+        a2a.applyStatus(snapshot.a2a.value);
       } else {
         applyFailure("a2a", "A2A status", snapshot.a2a.reason);
       }
@@ -965,8 +428,7 @@ export function useBridgeState() {
         );
       }
       if (snapshot.codeMemory.status === "fulfilled") {
-        setCodeMemoryStatus(snapshot.codeMemory.value);
-        setResourceError("codeMemory", snapshot.codeMemory.value.error ?? null);
+        codeMemory.applyStatus(snapshot.codeMemory.value);
       } else {
         applyFailure(
           "codeMemory",
@@ -975,7 +437,14 @@ export function useBridgeState() {
         );
       }
     },
-    [appendTrace, refreshModels, setResourceError],
+    [
+      a2a.applyStatus,
+      appendTrace,
+      browser.applyStatus,
+      codeMemory.applyStatus,
+      refreshModels,
+      setResourceError,
+    ],
   );
 
   useEffect(() => {
@@ -997,87 +466,17 @@ export function useBridgeState() {
         if (!disposed) {
           setLoading((current) => ({ ...current, initial: false }));
         }
-      });
+    });
     return () => {
       disposed = true;
-      loginVerificationTokenRef.current += 1;
     };
   }, [appendTrace, applyInitialSnapshot]);
-
-  const refreshA2aTasks = useCallback(
-    async (silent = false) => {
-      if (a2aOperationRef.current) {
-        return;
-      }
-      const generation = a2aMutationGenerationRef.current;
-      if (!silent) {
-        setResourceLoading("a2a", true);
-      }
-      try {
-        const tasks = await fetchTasksShared();
-        if (generation !== a2aMutationGenerationRef.current) {
-          return;
-        }
-        setA2aTasks(tasks);
-        setSelectedA2aTask((current) =>
-          current
-            ? (tasks.find((task) => task.id === current.id) ?? null)
-            : null,
-        );
-        setResourceError("a2a", null);
-      } catch (error) {
-        setResourceError("a2a", errorMessage(error));
-      } finally {
-        if (!silent) {
-          setResourceLoading("a2a", false);
-        }
-      }
-    },
-    [setResourceError, setResourceLoading],
-  );
-
-  useEffect(() => {
-    let disposed = false;
-    let timeout: number | undefined;
-    const poll = async () => {
-      if (!document.hidden) {
-        await refreshA2aTasks(true);
-      }
-      if (!disposed) {
-        const working = a2aTasksRef.current.some(
-          (task) => task.status.state === "TASK_STATE_WORKING",
-        );
-        timeout = window.setTimeout(() => void poll(), working ? 1_500 : 4_000);
-      }
-    };
-    void poll();
-    return () => {
-      disposed = true;
-      if (timeout !== undefined) {
-        window.clearTimeout(timeout);
-      }
-    };
-  }, [refreshA2aTasks]);
-
-  useEffect(() => {
-    const timeout = window.setTimeout(
-      () =>
-        persistWorkspace({
-          selectedModel,
-          trace,
-          activeConversationId,
-          conversations,
-        }),
-      300,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [activeConversationId, conversations, selectedModel, trace]);
 
   const refreshAll = useCallback(async () => {
     setLoading((current) => ({ ...current, initial: true }));
     setErrors((current) => ({ ...current, initialization: null }));
     try {
-      const [proxy, browser, desktop, a2a, codePolicy, codeMemory] =
+      const [proxy, browser, desktop, a2aResult, codePolicy, codeMemory] =
         await Promise.allSettled([
           backend.getProxyStatus(),
           backend.getBrowserStatus(),
@@ -1087,31 +486,32 @@ export function useBridgeState() {
           backend.getCodeMemoryStatus(),
         ]);
       await applyInitialSnapshot(
-        { proxy, browser, desktop, a2a, codePolicy, codeMemory },
+        { proxy, browser, desktop, a2a: a2aResult, codePolicy, codeMemory },
         true,
       );
-      await refreshA2aTasks();
+      await a2a.refreshTasks();
     } finally {
       setLoading((current) => ({ ...current, initial: false }));
     }
-  }, [applyInitialSnapshot, refreshA2aTasks]);
+  }, [a2a.refreshTasks, applyInitialSnapshot]);
 
-  const ensureProxy = useCallback(async () => {
+  const configureProxy = useCallback(async (baseUrl: string, apiKey: string) => {
     if (loading.proxy) {
       return;
     }
     setResourceLoading("proxy", true);
     setResourceError("proxy", null);
-    appendTrace("Starting CLIProxyAPI");
+    appendTrace("Connecting to the loopback model proxy");
     try {
-      const status = await backend.ensureProxy();
+      const status = await backend.configureProxy(baseUrl, apiKey);
+      probedModelRef.current = status.probedModel ?? null;
       setProxyStatus(status);
-      appendTrace("CLIProxyAPI is ready", "success");
+      appendTrace("Loopback model proxy connected", "success");
       await refreshModels();
     } catch (error) {
       const message = errorMessage(error);
       setResourceError("proxy", message);
-      appendTrace(`CLIProxyAPI failed to start: ${message}`, "error");
+      appendTrace(`Model proxy connection failed: ${message}`, "error");
     } finally {
       setResourceLoading("proxy", false);
     }
@@ -1122,157 +522,6 @@ export function useBridgeState() {
     setResourceError,
     setResourceLoading,
   ]);
-
-  const runBrowserOperation = useCallback(
-    async <T>(
-      label: string,
-      operation: () => Promise<T>,
-    ): Promise<T | null> => {
-      if (browserOperationRef.current) {
-        appendTrace("Another browser operation is already running", "error");
-        return null;
-      }
-      browserOperationRef.current = true;
-      setResourceLoading("browser", true);
-      setResourceError("browser", null);
-      try {
-        return await operation();
-      } catch (error) {
-        const message = errorMessage(error);
-        setResourceError("browser", message);
-        appendTrace(`${label} failed: ${message}`, "error");
-        return null;
-      } finally {
-        browserOperationRef.current = false;
-        setResourceLoading("browser", false);
-      }
-    },
-    [appendTrace, setResourceError, setResourceLoading],
-  );
-
-  const refreshBrowserStatus = useCallback(async () => {
-    const status = await runBrowserOperation("Browser status refresh", () =>
-      backend.getBrowserStatus(),
-    );
-    if (status) {
-      setBrowserStatus(status);
-    }
-  }, [runBrowserOperation]);
-
-  const startBrowser = useCallback(async () => {
-    appendTrace("Starting the isolated Chromium session");
-    lastBrowserSequenceRef.current = 0;
-    setBrowserFrame(null);
-    const status = await runBrowserOperation("Agent browser startup", () =>
-      backend.startBrowser(),
-    );
-    if (status) {
-      setBrowserStatus(status);
-      appendTrace("Agent browser is ready", "success");
-    }
-  }, [appendTrace, runBrowserOperation]);
-
-  const stopBrowser = useCallback(async () => {
-    const status = await runBrowserOperation("Agent browser shutdown", () =>
-      backend.stopBrowser(),
-    );
-    if (status) {
-      lastBrowserSequenceRef.current = 0;
-      setBrowserFrame(null);
-      setBrowserStatus(status);
-      appendTrace("Agent browser stopped", "success");
-    }
-  }, [appendTrace, runBrowserOperation]);
-
-  const navigateBrowser = useCallback(
-    async (url: string) => {
-      const address = url.trim();
-      if (!address) {
-        return;
-      }
-      appendTrace(`Navigating agent browser to ${truncateText(address, 512)}`);
-      const completed = await runBrowserOperation(
-        "Browser navigation",
-        async () => {
-          await backend.navigateBrowser(address);
-          return true;
-        },
-      );
-      if (completed) {
-        const status = await backend.getBrowserStatus().catch(() => null);
-        if (status) {
-          setBrowserStatus(status);
-        }
-        appendTrace("Agent browser navigation completed", "success");
-      }
-    },
-    [appendTrace, runBrowserOperation],
-  );
-
-  const clickBrowserAt = useCallback(
-    async (x: number, y: number) => {
-      if (!Number.isFinite(x) || !Number.isFinite(y)) {
-        appendTrace("Browser click coordinates must be finite", "error");
-        return;
-      }
-      const completed = await runBrowserOperation("Browser click", async () => {
-        await backend.clickBrowserAt(x, y);
-        return true;
-      });
-      if (completed) {
-        appendTrace(`Browser click at ${Math.round(x)}, ${Math.round(y)}`);
-      }
-    },
-    [appendTrace, runBrowserOperation],
-  );
-
-  const clickBrowserSelector = useCallback(
-    async (selector: string) => {
-      const target = selector.trim();
-      if (!target) {
-        appendTrace("Enter a browser selector before clicking", "error");
-        return;
-      }
-      const completed = await runBrowserOperation(
-        "Browser selector click",
-        async () => {
-          await backend.clickBrowserSelector(target);
-          return true;
-        },
-      );
-      if (completed) {
-        appendTrace(
-          `Clicked browser selector ${truncateText(target, 256)}`,
-          "success",
-        );
-      }
-    },
-    [appendTrace, runBrowserOperation],
-  );
-
-  const typeInBrowser = useCallback(
-    async (selector: string, text: string) => {
-      const target = selector.trim();
-      if (!target) {
-        appendTrace("Enter a browser selector before typing", "error");
-        return;
-      }
-      const completed = await runBrowserOperation(
-        "Browser typing",
-        async () => {
-          await backend.typeInBrowser(target, text);
-          return true;
-        },
-      );
-      if (completed) {
-        appendTrace(
-          `Typed into browser selector ${truncateText(target, 256)}`,
-          "success",
-        );
-      }
-    },
-    [appendTrace, runBrowserOperation],
-  );
 
   const runDesktopOperation = useCallback(
     async <T>(
@@ -1370,544 +619,66 @@ export function useBridgeState() {
     [appendTrace, runDesktopOperation],
   );
 
-  const runA2aOperation = useCallback(
-    async <T>(
-      label: string,
-      operation: () => Promise<T>,
-    ): Promise<T | null> => {
-      if (a2aOperationRef.current) {
-        appendTrace("Another A2A operation is already running", "error");
-        return null;
-      }
-      a2aOperationRef.current = true;
-      setResourceLoading("a2a", true);
-      setResourceError("a2a", null);
-      try {
-        return await operation();
-      } catch (error) {
-        const message = errorMessage(error);
-        setResourceError("a2a", message);
-        appendTrace(`${label} failed: ${message}`, "error");
-        return null;
-      } finally {
-        a2aOperationRef.current = false;
-        setResourceLoading("a2a", false);
-      }
-    },
-    [appendTrace, setResourceError, setResourceLoading],
-  );
-
-  const getA2aTask = useCallback(
-    async (id: string) => {
-      const task = await runA2aOperation("A2A task refresh", () =>
-        backend.getA2aTask(id),
-      );
-      if (task) {
-        setA2aTasks((current) => replaceTask(current, task));
-        setSelectedA2aTask(task);
-      }
-      return task;
-    },
-    [runA2aOperation],
-  );
-
-  const selectA2aTask = useCallback(
-    async (id: string | null) => {
-      if (!id) {
-        setSelectedA2aTask(null);
-        return null;
-      }
-      const cached = a2aTasksRef.current.find((task) => task.id === id);
-      if (cached) {
-        setSelectedA2aTask(cached);
-      }
-      return getA2aTask(id);
-    },
-    [getA2aTask],
-  );
-
-  const delegateA2aTask = useCallback(
-    async (request: DelegateA2aTaskRequest) => {
-      const prompt = request.prompt.trim();
-      if (!prompt) {
-        appendTrace("Enter an A2A task before delegating", "error");
-        return null;
-      }
-      a2aMutationGenerationRef.current += 1;
-      const task = await runA2aOperation("A2A delegation", () =>
-        backend.delegateA2aTask({
-          ...request,
-          prompt,
-          model: request.model || selectedModel || null,
-        }),
-      );
-      if (task) {
-        setA2aTasks((current) => replaceTask(current, task));
-        setSelectedA2aTask(task);
-        appendTrace(`Delegated A2A task ${task.id}`, "success");
-      }
-      return task;
-    },
-    [appendTrace, runA2aOperation, selectedModel],
-  );
-
-  const cancelA2aTask = useCallback(
-    async (id: string) => {
-      a2aMutationGenerationRef.current += 1;
-      const task = await runA2aOperation("A2A cancellation", () =>
-        backend.cancelA2aTask(id),
-      );
-      if (task) {
-        setA2aTasks((current) => replaceTask(current, task));
-        setSelectedA2aTask((current) => (current?.id === id ? task : current));
-        appendTrace(`Canceled A2A task ${id}`, "success");
-      }
-      return task;
-    },
-    [appendTrace, runA2aOperation],
-  );
-
-  const runCodeMemoryOperation = useCallback(
-    async <T>(
-      label: string,
-      operation: () => Promise<T>,
-    ): Promise<T | null> => {
-      if (codeMemoryOperationRef.current) {
-        appendTrace(
-          "Another code-memory operation is already running",
-          "error",
-        );
-        return null;
-      }
-      codeMemoryOperationRef.current = true;
-      setResourceLoading("codeMemory", true);
-      setResourceError("codeMemory", null);
-      try {
-        return await operation();
-      } catch (error) {
-        const message = errorMessage(error);
-        setResourceError("codeMemory", message);
-        appendTrace(`${label} failed: ${message}`, "error");
-        return null;
-      } finally {
-        codeMemoryOperationRef.current = false;
-        setResourceLoading("codeMemory", false);
-      }
-    },
-    [appendTrace, setResourceError, setResourceLoading],
-  );
-
-  const refreshCodeMemoryStatus = useCallback(async () => {
-    const status = await runCodeMemoryOperation(
-      "Code-memory status refresh",
-      () => backend.getCodeMemoryStatus(),
-    );
-    if (status) {
-      setCodeMemoryStatus(status);
-    }
-  }, [runCodeMemoryOperation]);
-
-  const indexCodeMemory = useCallback(
-    async (root: string) => {
-      const selectedRoot = root.trim();
-      if (!selectedRoot) {
-        appendTrace("Choose a source directory to index", "error");
-        return false;
-      }
-      setCodeMemoryStatus((current) =>
-        current ? { ...current, indexing: true, error: null } : current,
-      );
-      const result = await runCodeMemoryOperation("Code-memory indexing", () =>
-        backend.indexCodeMemory(selectedRoot),
-      );
-      if (!result) {
-        setCodeMemoryStatus((current) =>
-          current ? { ...current, indexing: false } : current,
-        );
-        return false;
-      }
-      setCodeMemoryStatus(result.status);
-      setCodeMemoryWarnings(result.warnings.slice(0, 256));
-      setCodeMemoryResults([]);
-      appendTrace(
-        `Indexed ${result.status.statistics.indexedFiles} source file${result.status.statistics.indexedFiles === 1 ? "" : "s"} into ${result.status.statistics.chunks} structural chunks`,
-        "success",
-      );
-      return true;
-    },
-    [appendTrace, runCodeMemoryOperation],
-  );
-
-  const searchCodeMemory = useCallback(
-    async (
-      query: string,
-      options: { maxResults?: number; graphWeight?: number } = {},
-    ) => {
-      const searchQuery = query.trim();
-      if (!searchQuery) {
-        setCodeMemoryResults([]);
-        return [];
-      }
-      const maxResults = Math.min(
-        100,
-        Math.max(1, Math.round(options.maxResults ?? 12)),
-      );
-      const graphWeight = Math.min(2, Math.max(0, options.graphWeight ?? 0.25));
-      const results = await runCodeMemoryOperation("Code-memory search", () =>
-        backend.searchCodeMemory({
-          query: searchQuery,
-          maxResults,
-          graphWeight,
-        }),
-      );
-      if (!results) {
-        return [];
-      }
-      setCodeMemoryResults(results);
-      appendTrace(
-        `Code memory returned ${results.length} result${results.length === 1 ? "" : "s"}`,
-        "success",
-      );
-      return results;
-    },
-    [appendTrace, runCodeMemoryOperation],
-  );
-
-  const clearCodeMemory = useCallback(async () => {
-    const status = await runCodeMemoryOperation("Code-memory cleanup", () =>
-      backend.clearCodeMemory(),
-    );
-    if (status) {
-      setCodeMemoryStatus(status);
-      setCodeMemoryResults([]);
-      setCodeMemoryWarnings([]);
-      appendTrace("Code memory cleared", "success");
-    }
-  }, [appendTrace, runCodeMemoryOperation]);
-
-  const clearCodeMemoryResults = useCallback(
-    () => setCodeMemoryResults([]),
-    [],
-  );
-
-  const sendPrompt = useCallback(
-    async (prompt: string) => {
-      const content = prompt.trim();
-      if (!content || sendingRef.current) {
-        return;
-      }
-      if (!selectedModel) {
-        appendTrace("Select an active model before sending", "error");
-        return;
-      }
-      if (utf8Length(content) > MAX_CHAT_REQUEST_LENGTH) {
-        appendTrace(
-          `Prompt exceeds the ${MAX_CHAT_REQUEST_LENGTH}-byte request limit`,
-          "error",
-        );
-        return;
-      }
-
-      const userMessage: UiChatMessage = {
-        id: nextId("user"),
-        role: "user",
-        content,
-      };
-      const history = requestHistory(
-        chat,
-        MAX_CHAT_REQUEST_LENGTH - utf8Length(content),
-      );
-      setChat((current) => boundedChat([...current, userMessage]));
-      sendingRef.current = true;
-      setSending(true);
-      setResourceLoading("chat", true);
-      setResourceError("chat", null);
-      appendTrace(`Sending prompt to ${selectedModel}`);
-      try {
-        const requestId = await backend.startChat({
-          model: selectedModel,
-          messages: [...history, { role: "user", content }],
-        });
-        setChat((current) =>
-          current.some((message) => message.id === requestId)
-            ? current
-            : boundedChat([
-                ...current,
-                {
-                  id: requestId,
-                  role: "assistant",
-                  content: "",
-                  streaming: true,
-                },
-              ]),
-        );
-      } catch (error) {
-        sendingRef.current = false;
-        setSending(false);
-        setResourceLoading("chat", false);
-        const message = errorMessage(error);
-        setResourceError("chat", message);
-        setChat((current) =>
-          boundedChat([
-            ...current,
-            {
-              id: nextId("assistant-error"),
-              role: "assistant",
-              content: "",
-              error: message,
-            },
-          ]),
-        );
-        appendTrace(`Prompt failed: ${message}`, "error");
-      }
-    },
-    [appendTrace, chat, selectedModel, setResourceError, setResourceLoading],
-  );
-
-  const retryLastPrompt = useCallback(async () => {
-    const previous = [...chat]
-      .reverse()
-      .find((message) => message.role === "user");
-    if (!previous) {
-      appendTrace("There is no previous prompt to retry", "error");
-      return;
-    }
-    await sendPrompt(previous.content);
-  }, [appendTrace, chat, sendPrompt]);
-
   const clearTrace = useCallback(() => setTrace([]), []);
-  const newConversation = useCallback(() => {
-    if (sendingRef.current) {
-      appendTrace(
-        "Wait for the active response before starting a new conversation",
-        "error",
-      );
-      return;
-    }
-    const conversation = createConversation();
-    setConversations((current) =>
-      [
-        conversation,
-        ...current.flatMap((candidate) => {
-          if (candidate.id !== activeConversationId) {
-            return [candidate];
-          }
-          if (chat.length === 0) {
-            return [];
-          }
-          return [
-            {
-              ...candidate,
-              updatedAt:
-                candidate.chat === chat
-                  ? candidate.updatedAt
-                  : new Date().toISOString(),
-              chat,
-            },
-          ];
-        }),
-      ].slice(0, MAX_CONVERSATIONS),
-    );
-    setActiveConversationId(conversation.id);
-    setChat(conversation.chat);
-    setResourceError("chat", null);
-  }, [activeConversationId, appendTrace, chat, setResourceError]);
-
-  const selectConversation = useCallback(
-    (id: string) => {
-      if (id === activeConversationId) {
-        return;
-      }
-      if (sendingRef.current) {
-        appendTrace(
-          "Wait for the active response before switching conversations",
-          "error",
-        );
-        return;
-      }
-      const conversation = conversations.find(
-        (candidate) => candidate.id === id,
-      );
-      if (!conversation) {
-        appendTrace("That conversation is no longer available", "error");
-        return;
-      }
-      setConversations((current) =>
-        current.map((candidate) =>
-          candidate.id === activeConversationId
-            ? {
-                ...candidate,
-                updatedAt:
-                  candidate.chat === chat
-                    ? candidate.updatedAt
-                    : new Date().toISOString(),
-                chat,
-              }
-            : candidate,
-        ),
-      );
-      setActiveConversationId(conversation.id);
-      setChat(conversation.chat);
-      setResourceError("chat", null);
-    },
-    [activeConversationId, appendTrace, chat, conversations, setResourceError],
-  );
-
-  const clearChat = useCallback(() => {
-    if (sendingRef.current) {
-      appendTrace("Wait for the active response before clearing chat", "error");
-      return;
-    }
-    setChat([]);
-    setResourceError("chat", null);
-  }, [appendTrace, setResourceError]);
-
-  const verifyLogin = useCallback(async () => {
-    const token = loginVerificationTokenRef.current + 1;
-    loginVerificationTokenRef.current = token;
-    setResourceLoading("login", true);
-    setResourceError("login", null);
-    for (let attempt = 1; attempt <= LOGIN_POLL_ATTEMPTS; attempt += 1) {
-      if (token !== loginVerificationTokenRef.current) {
-        return false;
-      }
-      setLoginVerification({ phase: "checking", attempt });
-      if (attempt > 1) {
-        await new Promise<void>((resolve) => {
-          window.setTimeout(resolve, LOGIN_POLL_INTERVAL_MS);
-        });
-      }
-      try {
-        const nextModels = await fetchModelsShared();
-        if (token !== loginVerificationTokenRef.current) {
-          return false;
-        }
-        if (nextModels.length > 0) {
-          applyModels(nextModels);
-          setLoginVerification({
-            phase: "verified",
-            modelCount: nextModels.length,
-            verifiedAt: new Date().toISOString(),
-          });
-          setResourceLoading("login", false);
-          appendTrace(
-            "ChatGPT login verified through the active model registry",
-            "success",
-          );
-          return true;
-        }
-      } catch {
-        // OAuth completion is asynchronous; keep polling within the fixed window.
-      }
-    }
-    const message =
-      "Login has not been verified yet. Finish OAuth, then verify again.";
-    setLoginVerification({ phase: "pending", error: message });
-    setResourceError("login", message);
-    setResourceLoading("login", false);
-    appendTrace(message, "error");
-    return false;
-  }, [appendTrace, applyModels, setResourceError, setResourceLoading]);
-
-  const launchLogin = useCallback(async () => {
-    setLoginState({ phase: "launching" });
-    setResourceLoading("login", true);
-    setResourceError("login", null);
-    appendTrace("Opening CLIProxyAPI Codex login");
-    try {
-      const launch = await backend.startLogin();
-      setLoginState({ phase: "launched", launch });
-      setResourceLoading("login", false);
-      appendTrace("Browser login was launched", "success");
-      void verifyLogin();
-    } catch (error) {
-      const message = errorMessage(error);
-      setLoginState({ phase: "error", error: message });
-      setResourceError("login", message);
-      setResourceLoading("login", false);
-      appendTrace(`Browser login failed: ${message}`, "error");
-    }
-  }, [appendTrace, setResourceError, setResourceLoading, verifyLogin]);
-
-  const resetLogin = useCallback(() => {
-    loginVerificationTokenRef.current += 1;
-    setLoginState({ phase: "idle" });
-    setLoginVerification({ phase: "idle" });
-    setResourceLoading("login", false);
-    setResourceError("login", null);
-  }, [setResourceError, setResourceLoading]);
-
-  const conversationSummaries: ConversationSummary[] = conversations.map(
-    (conversation) => ({
-      id: conversation.id,
-      title: conversationTitle(conversation.chat),
-      updatedAt: conversation.updatedAt,
-      messageCount: conversation.chat.length,
-    }),
-  );
+  const resetLocalSession = useCallback(() => {
+    setSelectedModel("");
+    setTrace([]);
+    browser.reset();
+    a2a.reset();
+    codeMemory.reset();
+    setErrors(initialErrors);
+  }, [a2a.reset, browser.reset, codeMemory.reset]);
 
   return {
     proxyStatus,
-    browserStatus,
-    browserFrame,
+    browserStatus: browser.status,
     desktopStatus,
-    a2aStatus,
-    a2aTasks,
-    selectedA2aTask,
+    a2aStatus: a2a.status,
+    a2aTasks: a2a.tasks,
+    selectedA2aTask: a2a.selectedTask,
     codePolicyStatus,
-    codeMemoryStatus,
-    codeMemoryResults,
-    codeMemoryWarnings,
+    codeMemoryStatus: codeMemory.status,
+    codeMemoryResults: codeMemory.results,
+    codeMemoryWarnings: codeMemory.warnings,
     models,
     selectedModel,
-    setSelectedModel,
+    setSelectedModel: selectModel,
     trace,
-    chat,
-    activeConversationId,
-    conversations: conversationSummaries,
-    sending,
     browserBusy: loading.browser,
     desktopBusy: loading.desktop,
     a2aBusy: loading.a2a,
     codeMemoryBusy: loading.codeMemory,
-    loginState,
-    setLoginState,
-    loginVerification,
     loading,
     errors,
     refreshAll,
     refreshModels,
-    ensureProxy,
-    refreshBrowserStatus,
-    startBrowser,
-    stopBrowser,
-    navigateBrowser,
-    clickBrowserAt,
-    clickBrowserSelector,
-    typeInBrowser,
+    configureProxy,
+    refreshBrowserStatus: browser.refreshStatus,
+    startBrowser: browser.start,
+    stopBrowser: browser.stop,
+    navigateBrowser: browser.navigate,
+    clickBrowserAt: browser.clickAt,
+    clickBrowserSelector: browser.clickSelector,
+    typeInBrowser: browser.type,
     refreshDesktopStatus,
     enableDesktopWorkMode,
     disableDesktopWorkMode,
     clickDesktopAt,
     typeOnDesktop,
-    refreshA2aTasks,
-    selectA2aTask,
-    getA2aTask,
-    delegateA2aTask,
-    cancelA2aTask,
-    refreshCodeMemoryStatus,
-    indexCodeMemory,
-    searchCodeMemory,
-    clearCodeMemory,
-    clearCodeMemoryResults,
-    sendPrompt,
-    retryLastPrompt,
-    newConversation,
-    selectConversation,
+    refreshA2aTasks: a2a.refreshTasks,
+    selectA2aTask: a2a.selectTask,
+    getA2aTask: a2a.getTask,
+    delegateA2aTask: a2a.delegateTask,
+    cancelA2aTask: a2a.cancelTask,
+    configureA2aServer: a2a.configureServer,
+    provisionA2aToken: a2a.provisionToken,
+    deleteA2aToken: a2a.deleteToken,
+    refreshCodeMemoryStatus: codeMemory.refreshStatus,
+    indexCodeMemory: codeMemory.index,
+    searchCodeMemory: codeMemory.search,
+    clearCodeMemory: codeMemory.clear,
+    clearCodeMemoryResults: codeMemory.clearResults,
     clearTrace,
-    clearChat,
-    launchLogin,
-    verifyLogin,
-    resetLogin,
+    resetLocalSession,
   };
 }
