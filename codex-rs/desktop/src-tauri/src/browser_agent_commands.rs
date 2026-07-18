@@ -63,7 +63,7 @@ pub async fn browser_start(
 
 #[tauri::command]
 pub async fn browser_stop(state: State<'_, BrowserAgent>) -> Result<BrowserStatus, String> {
-    state.shutdown().await;
+    state.shutdown().await.map_err(|error| error.to_string())?;
     Ok(state.status().await)
 }
 

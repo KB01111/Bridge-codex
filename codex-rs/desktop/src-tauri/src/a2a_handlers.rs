@@ -2,6 +2,8 @@ use axum::Json;
 use axum::extract::Path;
 use axum::extract::State;
 use axum::http::StatusCode;
+use tauri::AppHandle;
+use tauri::Emitter;
 use tauri::State as TauriState;
 
 use crate::a2a::A2aError;
@@ -13,11 +15,19 @@ use crate::a2a::validate_text_field;
 use crate::a2a_protocol::A2aJson;
 use crate::a2a_protocol::A2aMessage;
 use crate::a2a_protocol::A2aRole;
+use crate::a2a_protocol::A2aServerSettings;
 use crate::a2a_protocol::A2aServerStatus;
 use crate::a2a_protocol::A2aTask;
+use crate::a2a_protocol::A2aTokenProvisioning;
 use crate::a2a_protocol::DelegateTaskRequest;
 use crate::a2a_protocol::SendMessageRequest;
 use crate::a2a_protocol::SendMessageResponse;
+
+pub(super) async fn agent_card(
+    State(server): State<A2aServer>,
+) -> axum::Json<crate::a2a_protocol::AgentCard> {
+    crate::a2a_protocol::agent_card(server.port().await)
+}
 
 pub(super) async fn send_message(
     State(server): State<A2aServer>,
@@ -65,6 +75,90 @@ pub async fn list_a2a_tasks(state: TauriState<'_, A2aServer>) -> Result<Vec<A2aT
 #[tauri::command]
 pub async fn get_a2a_status(state: TauriState<'_, A2aServer>) -> Result<A2aServerStatus, String> {
     Ok(state.status().await)
+}
+
+pub(super) async fn cancel_task(
+    State(server): State<A2aServer>,
+    Path(id): Path<String>,
+) -> Result<A2aJson<A2aTask>, (StatusCode, String)> {
+    let id = id.strip_suffix(":cancel").ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "A2A cancellation route must end with :cancel".to_string(),
+        )
+    })?;
+    server
+        .cancel(id)
+        .await
+        .map(A2aJson)
+        .map_err(A2aError::into_http)
+}
+
+#[tauri::command]
+pub async fn configure_a2a_server(
+    app: AppHandle,
+    state: TauriState<'_, A2aServer>,
+    settings: A2aServerSettings,
+) -> Result<A2aServerStatus, String> {
+    let status = state
+        .configure(app.clone(), settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    let _ = app.emit("a2a-status", status.clone());
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn generate_a2a_token(
+    app: AppHandle,
+    state: TauriState<'_, A2aServer>,
+) -> Result<A2aTokenProvisioning, String> {
+    let provisioning = state
+        .generate_token()
+        .await
+        .map_err(|error| error.to_string())?;
+    reconcile_provisioning(&app, &state, provisioning).await
+}
+
+#[tauri::command]
+pub async fn regenerate_a2a_token(
+    app: AppHandle,
+    state: TauriState<'_, A2aServer>,
+) -> Result<A2aTokenProvisioning, String> {
+    let provisioning = state
+        .regenerate_token()
+        .await
+        .map_err(|error| error.to_string())?;
+    reconcile_provisioning(&app, &state, provisioning).await
+}
+
+#[tauri::command]
+pub async fn delete_a2a_token(
+    app: AppHandle,
+    state: TauriState<'_, A2aServer>,
+) -> Result<A2aServerStatus, String> {
+    let status = state
+        .delete_token()
+        .await
+        .map_err(|error| error.to_string())?;
+    let _ = app.emit("a2a-status", status.clone());
+    Ok(status)
+}
+
+async fn reconcile_provisioning(
+    app: &AppHandle,
+    state: &A2aServer,
+    mut provisioning: A2aTokenProvisioning,
+) -> Result<A2aTokenProvisioning, String> {
+    if provisioning.status.enabled && !provisioning.status.running {
+        state
+            .start(app.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        provisioning.status = state.status().await;
+    }
+    let _ = app.emit("a2a-status", provisioning.status.clone());
+    Ok(provisioning)
 }
 
 #[tauri::command]

@@ -3,20 +3,29 @@ use serde_json::json;
 use url::Url;
 use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::body_json;
+use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-use super::ChatMessage;
-use super::ChatRequest;
-use super::ChatRole;
 use super::CliProxyClient;
-use super::MAX_CHAT_STREAM_BYTES;
-use super::MAX_CONCURRENT_CHATS;
+use super::ProxyCapabilities;
+use super::ProxyCompatibility;
 use super::ProxyModel;
-use crate::code_policy::SANDBOX_EXECUTION_SYSTEM_PROMPT;
+use super::ProxyModelClassification;
+use super::known_gateway_model_ids;
+use crate::cli_proxy_http::MAX_MODELS_RESPONSE_BYTES;
+
+fn known_model_id() -> String {
+    known_gateway_model_ids()
+        .expect("bundled model catalog")
+        .into_iter()
+        .next()
+        .expect("bundled catalog should expose a stable API model")
+}
 
 #[tokio::test]
 async fn fetch_models_authenticates_sorts_and_deduplicates() {
@@ -34,11 +43,7 @@ async fn fetch_models_authenticates_sorts_and_deduplicates() {
         })))
         .mount(&server)
         .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        Some("secret".to_string()),
-    )
-    .expect("client");
+    let client = client(&server, Some("secret"));
 
     assert_eq!(
         client.fetch_models().await.expect("models"),
@@ -47,297 +52,335 @@ async fn fetch_models_authenticates_sorts_and_deduplicates() {
                 id: "model-a".to_string(),
                 object: Some("model".to_string()),
                 owned_by: Some("codex".to_string()),
+                classification: ProxyModelClassification::Experimental,
             },
             ProxyModel {
                 id: "model-z".to_string(),
                 object: Some("model".to_string()),
                 owned_by: Some("codex".to_string()),
+                classification: ProxyModelClassification::Experimental,
             },
         ]
     );
 }
 
 #[tokio::test]
-async fn complete_chat_uses_only_the_chat_completions_route() {
+async fn capability_probe_requires_authenticated_models_and_responses_routes() {
     let server = MockServer::start().await;
-    let request = ChatRequest {
-        model: "model-a".to_string(),
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: "hello".to_string(),
-        }],
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
-            "model": "model-a",
-            "messages": [
-                {"role": "system", "content": SANDBOX_EXECUTION_SYSTEM_PROMPT},
-                {"role": "user", "content": "hello"}
-            ],
-            "stream": false
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "choices": [{"message": {"content": "hello back"}}]
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-
-    assert_eq!(
-        client.complete_chat(&request).await.expect("completion"),
-        "hello back"
-    );
-}
-
-#[tokio::test]
-async fn streamed_chat_returns_tree_sitter_validation() {
-    let server = MockServer::start().await;
-    let request = ChatRequest {
-        model: "model-a".to_string(),
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: "write a program".to_string(),
-        }],
-    };
-    let code = "```rust\\nfn main() { println!(\\\"ok\\\"); }\\n```\\n\\nExpected stdout: ok";
-    let event = format!(
-        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{code}\"}}}}]}}\n\ndata: [DONE]\n\n"
-    );
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
-            "model": "model-a",
-            "messages": [
-                {"role": "system", "content": SANDBOX_EXECUTION_SYSTEM_PROMPT},
-                {"role": "user", "content": "write a program"}
-            ],
-            "stream": true
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(event, "text/event-stream"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-    let mut streamed = String::new();
-
-    let validation = client
-        .stream_chat(&request, |delta| streamed.push_str(&delta))
-        .await
-        .expect("stream");
-
-    assert!(validation.valid);
-    assert_eq!(
-        streamed,
-        "```rust\nfn main() { println!(\"ok\"); }\n```\n\nExpected stdout: ok"
-    );
-}
-
-#[tokio::test]
-async fn client_does_not_follow_proxy_redirects() {
-    let server = MockServer::start().await;
+    let model = known_model_id();
     Mock::given(method("GET"))
         .and(path("/v1/models"))
-        .respond_with(
-            ResponseTemplate::new(307)
-                .insert_header("location", format!("{}/redirected", server.uri())),
-        )
+        .and(header("authorization", "Bearer secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": model.clone(), "object": "model", "owned_by": "bridge"}]
+        })))
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/redirected"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
-        .expect(0)
-        .mount(&server)
-        .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-
-    let error = client.fetch_models().await.expect_err("redirect must fail");
-
-    assert!(error.to_string().contains("307 Temporary Redirect"));
-}
-
-#[tokio::test]
-async fn proxy_error_bodies_are_bounded() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/models"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("x".repeat(64 * 1024)))
-        .mount(&server)
-        .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-
-    let error = client.fetch_models().await.expect_err("error response");
-    let message = error.to_string();
-
-    assert!(message.len() < 9 * 1024);
-    assert!(message.ends_with("[truncated]"));
-}
-
-#[tokio::test]
-async fn streamed_chat_requires_done_marker_and_content() {
-    let server = MockServer::start().await;
-    let partial = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
     Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(partial, "text/event-stream"))
-        .mount(&server)
-        .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-    let request = ChatRequest {
-        model: "model-a".to_string(),
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: "hello".to_string(),
-        }],
-    };
-
-    let error = client
-        .stream_chat(&request, |_| {})
-        .await
-        .expect_err("partial stream must fail");
-
-    assert!(error.to_string().contains("before the [DONE] marker"));
-
-    let empty_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw("data: [DONE]\n\n", "text/event-stream"),
-        )
-        .mount(&empty_server)
-        .await;
-    let empty_client = CliProxyClient::new(
-        Url::parse(&format!("{}/", empty_server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-
-    let error = empty_client
-        .stream_chat(&request, |_| {})
-        .await
-        .expect_err("empty stream must fail");
-    assert!(error.to_string().contains("no assistant content"));
-}
-
-#[tokio::test]
-async fn complete_and_streamed_chat_reject_empty_or_unbounded_content() {
-    let empty_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "choices": [{"message": {"content": "   "}}]
+        .and(path("/v1/responses"))
+        .and(body_partial_json(json!({
+            "tool_choice": {"type": "function", "name": "bridge_probe"}
         })))
-        .mount(&empty_server)
-        .await;
-    let empty_client = CliProxyClient::new(
-        Url::parse(&format!("{}/", empty_server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-    let request = ChatRequest {
-        model: "model-a".to_string(),
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: "hello".to_string(),
-        }],
-    };
-
-    let empty_error = empty_client
-        .complete_chat(&request)
-        .await
-        .expect_err("empty completion must fail");
-    assert!(empty_error.to_string().contains("no assistant content"));
-
-    let oversized_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(
-            format!("data: {}\n\n", "x".repeat(MAX_CHAT_STREAM_BYTES)),
+            concat!(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{",
+                "\"type\":\"function_call\",\"call_id\":\"call-1\",",
+                "\"name\":\"bridge_probe\",\"arguments\":\"{\\\"value\\\":\\\"ping\\\"}\"}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n"
+            ),
             "text/event-stream",
         ))
-        .mount(&oversized_server)
+        .expect(1)
+        .mount(&server)
         .await;
-    let oversized_client = CliProxyClient::new(
-        Url::parse(&format!("{}/", oversized_server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(body_partial_json(json!({"tool_choice": "none"})))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("continuation body");
+            let marker = body["input"]
+                .as_array()
+                .and_then(|input| {
+                    input
+                        .iter()
+                        .find(|item| item["type"] == "function_call_output")
+                })
+                .and_then(|item| item["output"].as_str())
+                .expect("probe marker");
+            ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "output": [{
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": marker}]
+                            }]
+                        }
+                    })
+                ),
+                "text/event-stream",
+            )
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer secret"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server, Some("secret"));
 
-    let stream_error = oversized_client
-        .stream_chat(&request, |_| {})
-        .await
-        .expect_err("oversized stream must fail");
-    assert!(stream_error.to_string().contains("wire limit"));
+    let capabilities = client.probe_capabilities().await.expect("capabilities");
+
+    assert_eq!(
+        capabilities,
+        ProxyCapabilities {
+            models_api: true,
+            responses_api: true,
+            compatibility: ProxyCompatibility::Conformant,
+            conformance_error: None,
+            probed_model: Some(model),
+            experimental_model_count: 0,
+        }
+    );
 }
 
 #[tokio::test]
-async fn chat_concurrency_is_bounded_for_client_clones() {
+async fn capability_probe_reports_a_missing_responses_route() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
-        .and(path("/v1/chat/completions"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        client(&server, Some("secret"))
+            .probe_capabilities()
+            .await
+            .expect("capabilities"),
+        ProxyCapabilities {
+            models_api: true,
+            responses_api: false,
+            compatibility: ProxyCompatibility::Unavailable,
+            conformance_error: None,
+            probed_model: None,
+            experimental_model_count: 0,
+        }
+    );
+}
+
+#[tokio::test]
+async fn capability_probe_classifies_malformed_responses_sse_as_basic() {
+    let server = MockServer::start().await;
+    let model = known_model_id();
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": model.clone()}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(body_partial_json(json!({
+            "tool_choice": {"type": "function", "name": "bridge_probe"}
+        })))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(std::time::Duration::from_millis(250))
-                .set_body_json(json!({
-                    "choices": [{"message": {"content": "ok"}}]
-                })),
+            ResponseTemplate::new(200).set_body_raw("data: not-json\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
-    let client = CliProxyClient::new(
-        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
-        /*api_key*/ None,
-    )
-    .expect("client");
-    let request = ChatRequest {
-        model: "model-a".to_string(),
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: "hello".to_string(),
-        }],
-    };
-    let handles = (0..=MAX_CONCURRENT_CHATS)
-        .map(|_| {
-            let client = client.clone();
-            let request = request.clone();
-            tokio::spawn(async move { client.complete_chat(&request).await })
-        })
-        .collect::<Vec<_>>();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let received = server
-        .received_requests()
+    let capabilities = client(&server, Some("secret"))
+        .probe_capabilities()
         .await
-        .expect("request recording is enabled");
-    assert_eq!(received.len(), MAX_CONCURRENT_CHATS);
+        .expect("capabilities");
 
-    for handle in handles {
-        assert_eq!(
-            handle.await.expect("chat task completed").expect("chat"),
-            "ok"
-        );
-    }
+    assert!(capabilities.models_api);
+    assert!(capabilities.responses_api);
+    assert_eq!(capabilities.compatibility, ProxyCompatibility::Basic);
+    assert_eq!(capabilities.probed_model, Some(model));
+    assert_eq!(capabilities.experimental_model_count, 0);
+    assert!(
+        capabilities.conformance_error.as_deref().is_some_and(
+            |error| error.contains("invalid CLIProxyAPI forced function call SSE stream")
+        )
+    );
+}
+
+#[tokio::test]
+async fn unrecognized_models_remain_experimental_and_are_not_probed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "vendor-model-next"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let capabilities = client(&server, Some("secret"))
+        .probe_capabilities()
+        .await
+        .expect("capabilities");
+
+    assert_eq!(capabilities.compatibility, ProxyCompatibility::Basic);
+    assert_eq!(capabilities.probed_model, None);
+    assert_eq!(capabilities.experimental_model_count, 1);
+    assert!(
+        capabilities
+            .conformance_error
+            .as_deref()
+            .is_some_and(|error| error.contains("unrecognized experimental models"))
+    );
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("request recording")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn requests_fail_closed_without_an_api_key() {
+    let server = MockServer::start().await;
+    let error = client(&server, /*api_key*/ None)
+        .fetch_models()
+        .await
+        .expect_err("missing key must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("authentication is not configured")
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("request recording")
+            .is_empty()
+    );
+}
+
+#[test]
+fn client_rejects_non_loopback_or_path_bearing_origins() {
+    let remote_error = CliProxyClient::new(
+        Url::parse("http://example.com:8317/").expect("remote URL"),
+        Some("secret".to_string()),
+    )
+    .err()
+    .expect("remote host must fail");
+    let path_error = CliProxyClient::new(
+        Url::parse("http://127.0.0.1:8317/proxy/").expect("path URL"),
+        Some("secret".to_string()),
+    )
+    .err()
+    .expect("path-bearing origin must fail");
+
+    assert!(remote_error.to_string().contains("loopback host"));
+    assert!(path_error.to_string().contains("without a path"));
+}
+
+#[tokio::test]
+async fn client_does_not_follow_redirects() {
+    let source = MockServer::start().await;
+    let target = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/capture", target.uri())),
+        )
+        .mount(&source)
+        .await;
+
+    let error = client(&source, Some("secret"))
+        .fetch_models()
+        .await
+        .expect_err("redirect must fail");
+
+    assert!(error.to_string().contains("302"));
+    assert!(
+        target
+            .received_requests()
+            .await
+            .expect("request recording")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn model_bodies_are_bounded_and_error_bodies_are_never_exposed() {
+    let oversized = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_bytes(vec![b'x'; MAX_MODELS_RESPONSE_BYTES + 1]),
+        )
+        .mount(&oversized)
+        .await;
+    let model_error = client(&oversized, Some("secret"))
+        .fetch_models()
+        .await
+        .expect_err("oversized model body must fail");
+
+    let remote_error = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_string("echoed-secret-value".repeat(2 * 1024)),
+        )
+        .mount(&remote_error)
+        .await;
+    let bounded_error = client(&remote_error, Some("secret"))
+        .fetch_models()
+        .await
+        .expect_err("remote error must fail")
+        .to_string();
+
+    assert!(model_error.to_string().contains("exceeds the"));
+    assert!(bounded_error.contains("models request"));
+    assert!(bounded_error.contains("500"));
+    assert!(bounded_error.contains("response body omitted"));
+    assert!(!bounded_error.contains("echoed-secret-value"));
+}
+
+fn client(server: &MockServer, api_key: Option<&str>) -> CliProxyClient {
+    CliProxyClient::new(
+        Url::parse(&format!("{}/", server.uri())).expect("server URL"),
+        api_key.map(ToString::to_string),
+    )
+    .expect("client")
 }

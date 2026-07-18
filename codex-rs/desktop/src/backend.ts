@@ -1,26 +1,35 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   A2aStatus,
+  A2aServerSettings,
   A2aTask,
+  A2aTokenProvisioning,
   BrowserFrame,
   BrowserStatus,
-  ChatChunk,
-  ChatRequest,
   CodePolicyStatus,
-  CodeValidation,
   CodeMemoryIndexResult,
   CodeMemorySearchRequest,
   CodeMemorySearchResult,
   CodeMemoryStatus,
   DelegateA2aTaskRequest,
   DesktopStatus,
-  LoginLaunch,
   ProxyModel,
   ProxyStatus,
-  SandboxValidationEvent,
 } from "./types";
+import { previewInvoke, previewListen, previewMode } from "./previewBridge";
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return previewMode ? previewInvoke<T>(command, args) : tauriInvoke<T>(command, args);
+}
+
+function listen<T>(
+  event: string,
+  handler: Parameters<typeof tauriListen<T>>[1],
+): Promise<UnlistenFn> {
+  return previewMode ? previewListen() : tauriListen<T>(event, handler);
+}
 
 type EventHandler<T> = (payload: T) => void;
 
@@ -31,16 +40,43 @@ function onEvent<T>(
   return listen<T>(event, ({ payload }) => handler(payload));
 }
 
+function isUnavailableCommand(error: unknown, command: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return (
+    (normalized.includes(command) &&
+      (normalized.includes("not found") || normalized.includes("unknown"))) ||
+    normalized.includes("__tauri_internals__") ||
+    normalized.includes("reading 'invoke'") ||
+    normalized.includes('reading "invoke"')
+  );
+}
+
+async function deleteAllLocalDataIfAvailable(): Promise<boolean> {
+  const command = "delete_all_local_data";
+  try {
+    await invoke<void>(command);
+    return true;
+  } catch (error) {
+    if (isUnavailableCommand(error, command)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export const backend = {
+  deleteAllLocalDataIfAvailable,
+  exportSupportBundle: () => invoke<string>("export_support_bundle"),
+  grantAgentBrowserConsent: (threadId: string) =>
+    invoke<void>("grant_agent_browser_consent", { threadId }),
+  revokeAgentBrowserConsent: (threadId: string) =>
+    invoke<void>("revoke_agent_browser_consent", { threadId }),
   getProxyStatus: () => invoke<ProxyStatus>("get_proxy_status"),
-  ensureProxy: () => invoke<ProxyStatus>("ensure_cliproxyapi"),
-  startLogin: () => invoke<LoginLaunch>("run_chatgpt_browser_login"),
+  configureProxy: (baseUrl: string, apiKey: string) =>
+    invoke<ProxyStatus>("configure_proxy", { baseUrl, apiKey }),
   fetchModels: () => invoke<ProxyModel[]>("fetch_active_models"),
-  startChat: (request: ChatRequest) =>
-    invoke<string>("start_chat_completion", { request }),
   getCodePolicyStatus: () => invoke<CodePolicyStatus>("get_code_policy_status"),
-  validateSandboxResponse: (response: string) =>
-    invoke<CodeValidation>("validate_sandbox_response", { response }),
 
   getBrowserStatus: () => invoke<BrowserStatus>("browser_status"),
   startBrowser: () => invoke<BrowserStatus>("browser_start"),
@@ -64,6 +100,13 @@ export const backend = {
 
   listA2aTasks: () => invoke<A2aTask[]>("list_a2a_tasks"),
   getA2aStatus: () => invoke<A2aStatus>("get_a2a_status"),
+  configureA2aServer: (settings: A2aServerSettings) =>
+    invoke<A2aStatus>("configure_a2a_server", { settings }),
+  generateA2aToken: () =>
+    invoke<A2aTokenProvisioning>("generate_a2a_token"),
+  regenerateA2aToken: () =>
+    invoke<A2aTokenProvisioning>("regenerate_a2a_token"),
+  deleteA2aToken: () => invoke<A2aStatus>("delete_a2a_token"),
   delegateA2aTask: ({ prompt, model, contextId }: DelegateA2aTaskRequest) =>
     invoke<A2aTask>("delegate_a2a_task", {
       prompt,
@@ -84,10 +127,6 @@ export const backend = {
     onEvent("proxy-status", handler),
   onA2aStatus: (handler: EventHandler<A2aStatus>) =>
     onEvent("a2a-status", handler),
-  onChatChunk: (handler: EventHandler<ChatChunk>) =>
-    onEvent("chat-chunk", handler),
-  onSandboxValidation: (handler: EventHandler<SandboxValidationEvent>) =>
-    onEvent("sandbox-validation", handler),
   onBrowserFrame: (handler: EventHandler<BrowserFrame>) =>
     onEvent("browser-frame", handler),
   onCodeMemoryStatus: (handler: EventHandler<CodeMemoryStatus>) =>

@@ -1,16 +1,17 @@
 import {
   type FormEvent,
+  type KeyboardEvent,
   type MouseEvent,
   useEffect,
   useRef,
   useState,
 } from "react";
 
-import type { BrowserFrame, BrowserStatus } from "../types";
+import { useBrowserFrame } from "../browserFrameStore";
+import type { BrowserStatus } from "../types";
 
 export type BrowserWorkspaceProps = {
   status: BrowserStatus | null;
-  frame: BrowserFrame | null;
   busy: boolean;
   error?: string | null;
   onStart: () => Promise<void>;
@@ -23,7 +24,6 @@ export type BrowserWorkspaceProps = {
 
 export function BrowserWorkspace({
   status,
-  frame,
   busy,
   error,
   onStart,
@@ -33,6 +33,7 @@ export function BrowserWorkspace({
   onClickAt,
   onType,
 }: BrowserWorkspaceProps) {
+  const frame = useBrowserFrame();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawSequence = useRef(0);
   const editingAddress = useRef(false);
@@ -41,10 +42,12 @@ export function BrowserWorkspace({
   const [browserText, setBrowserText] = useState("");
   const [coordinateX, setCoordinateX] = useState("");
   const [coordinateY, setCoordinateY] = useState("");
+  const [keyboardPoint, setKeyboardPoint] = useState({ x: 640, y: 360 });
 
   const viewportWidth = frame?.width ?? status?.viewportWidth ?? 1280;
   const viewportHeight = frame?.height ?? status?.viewportHeight ?? 720;
   const browserRunning = Boolean(status?.running);
+  const previewInteractive = Boolean(frame && browserRunning && !busy);
   const health =
     status && "health" in status && typeof status.health === "string"
       ? status.health
@@ -83,6 +86,13 @@ export function BrowserWorkspace({
     };
     image.src = `data:image/jpeg;base64,${frame.jpegBase64}`;
   }, [frame]);
+
+  useEffect(() => {
+    setKeyboardPoint((point) => ({
+      x: Math.min(Math.max(point.x, 0), Math.max(viewportWidth - 1, 0)),
+      y: Math.min(Math.max(point.y, 0), Math.max(viewportHeight - 1, 0)),
+    }));
+  }, [viewportHeight, viewportWidth]);
 
   function submitNavigation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -130,7 +140,7 @@ export function BrowserWorkspace({
   }
 
   function clickPreview(event: MouseEvent<HTMLCanvasElement>) {
-    if (!frame) {
+    if (!frame || busy) {
       return;
     }
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -140,6 +150,44 @@ export function BrowserWorkspace({
     const x = ((event.clientX - bounds.left) / bounds.width) * frame.width;
     const y = ((event.clientY - bounds.top) / bounds.height) * frame.height;
     void onClickAt(x, y);
+  }
+
+  function previewKeyDown(event: KeyboardEvent<HTMLCanvasElement>) {
+    if (!previewInteractive) {
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      void onClickAt(keyboardPoint.x, keyboardPoint.y);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      setKeyboardPoint({
+        x: Math.floor(viewportWidth / 2),
+        y: Math.floor(viewportHeight / 2),
+      });
+      return;
+    }
+    const step = event.shiftKey ? 1 : 10;
+    const movement =
+      event.key === "ArrowLeft"
+        ? { x: -step, y: 0 }
+        : event.key === "ArrowRight"
+          ? { x: step, y: 0 }
+          : event.key === "ArrowUp"
+            ? { x: 0, y: -step }
+            : event.key === "ArrowDown"
+              ? { x: 0, y: step }
+              : null;
+    if (!movement) {
+      return;
+    }
+    event.preventDefault();
+    setKeyboardPoint((point) => ({
+      x: Math.min(Math.max(point.x + movement.x, 0), viewportWidth - 1),
+      y: Math.min(Math.max(point.y + movement.y, 0), viewportHeight - 1),
+    }));
   }
 
   return (
@@ -205,20 +253,31 @@ export function BrowserWorkspace({
         </p>
       )}
 
-      <div
-        className="browser-canvas-shell"
-        aria-describedby="browser-preview-help"
-      >
+      <div className="browser-canvas-shell">
         <canvas
           ref={canvasRef}
           width={viewportWidth}
           height={viewportHeight}
           onClick={clickPreview}
-          role="img"
-          aria-label={`Live agent browser preview${frame?.url ? ` of ${frame.url}` : ""}`}
+          onKeyDown={previewKeyDown}
+          role="button"
+          tabIndex={previewInteractive ? 0 : -1}
+          aria-disabled={!previewInteractive}
+          aria-describedby="browser-preview-help"
+          aria-label={`Live agent browser preview${frame?.url ? ` of ${frame.url}` : ""}. Keyboard target ${Math.round(keyboardPoint.x)}, ${Math.round(keyboardPoint.y)}`}
         >
           Live browser preview at {viewportWidth} by {viewportHeight} pixels.
         </canvas>
+        {frame && (
+          <span
+            className="browser-keyboard-target"
+            style={{
+              left: `${(keyboardPoint.x / viewportWidth) * 100}%`,
+              top: `${(keyboardPoint.y / viewportHeight) * 100}%`,
+            }}
+            aria-hidden="true"
+          />
+        )}
         {!frame && (
           <div className="canvas-empty-state" role="status">
             <p>
@@ -239,8 +298,9 @@ export function BrowserWorkspace({
         )}
       </div>
       <p id="browser-preview-help">
-        Click the preview to interact by position, or use the
-        keyboard-accessible controls below.
+        Click or tap the preview to interact by position. With keyboard focus,
+        use the arrow keys to move the target and Enter to click. Exact controls
+        are available below.
       </p>
 
       <details className="manual-tool-disclosure">

@@ -1,54 +1,51 @@
-name: desktop release
+name: desktop private release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing source tag, for example bridge-desktop-v1.0.0-rc.1
+        required: true
+        type: string
   push:
     tags:
       - "bridge-desktop-v*"
 
 permissions:
-  contents: write
+  contents: read
+  id-token: write
+  attestations: write
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desktop-private-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   bundle:
-    name: Bundle (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-15
-          - macos-15-intel
-          - ubuntu-22.04
-          - windows-2022
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    name: Signed Windows 11 x64 bundle
+    runs-on: windows-2022
+    environment: bridge-private-release
+    timeout-minutes: 150
+    env:
+      RELEASE_REPOSITORY: KB01111/Bridge-codex-releases
+      RELEASE_REPOSITORY_DEFAULT_BRANCH: main
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      SOURCE_REF: ${{ github.ref }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      SOURCE_SHA: ${{ github.sha }}
     steps:
-      - name: Checkout repository
+      - name: Checkout tagged source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: ./.github/actions/setup-ci
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-
-      - name: Install Tauri prerequisites (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            patchelf
 
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
@@ -62,29 +59,103 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
+      - name: Validate source tag, version, and upstream baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          node codex-rs/desktop/scripts/check-version.mjs
+
+          $configuration = Get-Content `
+            -LiteralPath "codex-rs/desktop/src-tauri/tauri.conf.json" `
+            -Raw | ConvertFrom-Json
+          $expectedTag = "bridge-desktop-v$($configuration.version)"
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "Release tag '$env:RELEASE_TAG' does not match '$expectedTag'."
+          }
+          $expectedSourceRef = "refs/tags/$env:RELEASE_TAG"
+          if ($env:SOURCE_REF -ne $expectedSourceRef) {
+            throw "Release workflows must run from $expectedSourceRef, not $env:SOURCE_REF."
+          }
+
+          $tagCommit = (git rev-parse "refs/tags/$env:RELEASE_TAG^{commit}").Trim()
+          $headCommit = (git rev-parse HEAD).Trim()
+          if ($tagCommit -ne $headCommit) {
+            throw "Checked-out source $headCommit does not match release tag commit $tagCommit."
+          }
+          if ($env:SOURCE_SHA -ne $headCommit) {
+            throw "The workflow ref ($env:SOURCE_REF at $env:SOURCE_SHA) must resolve to the release tag commit $headCommit."
+          }
+
+          $baseline = (Get-Content -LiteralPath "codex-rs/desktop/UPSTREAM_BASELINE" -Raw).Trim()
+          if ($baseline -notmatch '^[0-9a-f]{40}$') {
+            throw "UPSTREAM_BASELINE must contain one full Git commit SHA."
+          }
+          git merge-base --is-ancestor $baseline HEAD
+
+      - name: Validate private release target and required secrets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.BRIDGE_RELEASE_TOKEN }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $requiredSecrets = @{
+            GH_TOKEN = "BRIDGE_RELEASE_TOKEN"
+            WINDOWS_CERTIFICATE = "WINDOWS_CERTIFICATE"
+            WINDOWS_CERTIFICATE_PASSWORD = "WINDOWS_CERTIFICATE_PASSWORD"
+            WINDOWS_TIMESTAMP_URL = "WINDOWS_TIMESTAMP_URL"
+          }
+          foreach ($entry in $requiredSecrets.GetEnumerator()) {
+            $value = [Environment]::GetEnvironmentVariable($entry.Key)
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              throw "Missing required protected-environment secret: $($entry.Value)"
+            }
+          }
+          $repository = gh api "repos/$env:RELEASE_REPOSITORY" | ConvertFrom-Json
+          if (-not $repository.private) {
+            throw "Release repository $env:RELEASE_REPOSITORY must remain private."
+          }
+          if (-not $repository.permissions.push) {
+            throw "BRIDGE_RELEASE_TOKEN cannot write to $env:RELEASE_REPOSITORY."
+          }
+          if ($repository.default_branch -ne $env:RELEASE_REPOSITORY_DEFAULT_BRANCH) {
+            throw "Release repository default branch must be $env:RELEASE_REPOSITORY_DEFAULT_BRANCH."
+          }
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Require macOS signing and notarization secrets
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Test release frontend
         run: |
-          set -euo pipefail
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [[ -z "${!name}" ]]; then
-              echo "Missing required macOS release secret: $name" >&2
-              exit 1
-            fi
-          done
+          pnpm --dir codex-rs/desktop test
+          pnpm --dir codex-rs/desktop build
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir codex-rs/desktop exec playwright install chromium
+
+      - name: Test release keyboard and responsive browser flows
+        run: pnpm --dir codex-rs/desktop test:e2e
+
+      - name: Upload release Playwright evidence
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-release-playwright-${{ env.RELEASE_TAG }}
+          path: output/playwright/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Test release Rust crates
+        working-directory: codex-rs
+        run: |
+          just test -p codex-code-memory
+          just test -p codex-desktop
 
       - name: Import Windows signing certificate
-        if: runner.os == 'Windows'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -93,52 +164,408 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           foreach ($name in @("WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD", "WINDOWS_TIMESTAMP_URL")) {
-            if ([string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) {
               throw "Missing required Windows release secret: $name"
             }
           }
           $certificatePath = Join-Path $env:RUNNER_TEMP "bridge-codex-signing.pfx"
-          [IO.File]::WriteAllBytes(
-            $certificatePath,
-            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
-          )
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $certificate = Import-PfxCertificate `
-            -FilePath $certificatePath `
-            -CertStoreLocation Cert:\CurrentUser\My `
-            -Password $password
-          if ($null -eq $certificate -or [string]::IsNullOrWhiteSpace($certificate.Thumbprint)) {
-            throw "Windows signing certificate import returned no thumbprint"
+          try {
+            [IO.File]::WriteAllBytes(
+              $certificatePath,
+              [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+            )
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate `
+              -FilePath $certificatePath `
+              -CertStoreLocation Cert:\CurrentUser\My `
+              -Password $password)
+          } finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
           }
-          $configuration = @{
+          $signingCertificates = @($imported | Where-Object { $_.HasPrivateKey })
+          if ($signingCertificates.Count -ne 1) {
+            throw "Windows signing PFX must contain exactly one certificate with a private key."
+          }
+          $certificate = $signingCertificates[0]
+          if ($certificate.NotAfter.ToUniversalTime() -le [DateTime]::UtcNow) {
+            throw "Windows signing certificate has expired."
+          }
+          $thumbprint = $certificate.Thumbprint.ToUpperInvariant()
+          "SIGNING_CERTIFICATE_THUMBPRINT=$thumbprint" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+          @{
             bundle = @{
               windows = @{
-                certificateThumbprint = $certificate.Thumbprint
+                certificateThumbprint = $thumbprint
                 digestAlgorithm = "sha256"
                 timestampUrl = $env:WINDOWS_TIMESTAMP_URL
               }
             }
-          } | ConvertTo-Json -Depth 4
-          Set-Content `
+          } | ConvertTo-Json -Depth 4 | Set-Content `
             -LiteralPath "codex-rs/desktop/src-tauri/tauri.release.conf.json" `
-            -Value $configuration `
             -Encoding utf8NoBOM
 
-      - name: Build signed bundles and draft release
-        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Build signed installer candidates
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         with:
           projectPath: codex-rs/desktop
           tauriScript: pnpm tauri
-          tagName: bridge-desktop-v__VERSION__
-          releaseName: Bridge Codex v__VERSION__
-          releaseBody: Install CLIProxyAPI separately and configure it on localhost:8317 before starting Bridge Codex.
-          releaseDraft: true
-          prerelease: false
-          args: ${{ runner.os == 'Windows' && '--config src-tauri/tauri.release.conf.json' || '' }}
+          args: --config src-tauri/tauri.release.conf.json --bundles msi,nsis
+
+      - name: Verify signed and timestamped installers
+        id: installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundleRoot = (Resolve-Path -LiteralPath "codex-rs/target/release/bundle").Path
+          $msi = @(Get-ChildItem -LiteralPath (Join-Path $bundleRoot "msi") -Filter *.msi -File)
+          $nsis = @(Get-ChildItem -LiteralPath (Join-Path $bundleRoot "nsis") -Filter *-setup.exe -File)
+          if ($msi.Count -ne 1 -or $nsis.Count -ne 1) {
+            throw "Expected exactly one signed MSI and one signed NSIS installer."
+          }
+          foreach ($artifact in @($msi[0], $nsis[0])) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Authenticode verification failed for $($artifact.Name): $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:SIGNING_CERTIFICATE_THUMBPRINT) {
+              throw "Unexpected signing certificate on $($artifact.Name)."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "No trusted timestamp was found on $($artifact.Name)."
+            }
+          }
+          "bundle_root=$bundleRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msi_path=$($msi[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "nsis_path=$($nsis[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Generate installer checksums
+        id: checksums
+        shell: pwsh
+        env:
+          MSI_PATH: ${{ steps.installers.outputs.msi_path }}
+          NSIS_PATH: ${{ steps.installers.outputs.nsis_path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checksumPath = Join-Path $env:RUNNER_TEMP "SHA256SUMS.txt"
+          @($env:MSI_PATH, $env:NSIS_PATH) | Sort-Object { Split-Path $_ -Leaf } | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path $_ -Leaf)"
+          } | Set-Content -LiteralPath $checksumPath -Encoding ascii
+          "checksum_path=$checksumPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Generate installer-bundle SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: ${{ steps.installers.outputs.bundle_root }}
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/bridge-codex-installer-sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Bind installer identities into SBOM
+        shell: pwsh
+        env:
+          MSI_PATH: ${{ steps.installers.outputs.msi_path }}
+          NSIS_PATH: ${{ steps.installers.outputs.nsis_path }}
+          SBOM_PATH: ${{ runner.temp }}/bridge-codex-installer-sbom.cdx.json
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sbom = Get-Content -LiteralPath $env:SBOM_PATH -Raw | ConvertFrom-Json
+          if ($sbom.bomFormat -ne "CycloneDX" -or [string]::IsNullOrWhiteSpace($sbom.specVersion)) {
+            throw "Generated SBOM is not a valid CycloneDX document."
+          }
+          $version = (Get-Content -LiteralPath "codex-rs/desktop/VERSION" -Raw).Trim()
+          $installerComponents = @($env:MSI_PATH, $env:NSIS_PATH) | ForEach-Object {
+            $artifact = Get-Item -LiteralPath $_
+            $hash = (Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            [ordered]@{
+              type = "file"
+              name = $artifact.Name
+              version = $version
+              "bom-ref" = "urn:bridge-codex:installer:$($artifact.Name):sha256:$hash"
+              hashes = @([ordered]@{ alg = "SHA-256"; content = $hash })
+            }
+          }
+          $components = @($sbom.components) + @($installerComponents)
+          if ($sbom.PSObject.Properties.Name -contains "components") {
+            $sbom.components = $components
+          } else {
+            $sbom | Add-Member -NotePropertyName components -NotePropertyValue $components
+          }
+          $sbom | ConvertTo-Json -Depth 100 | Set-Content `
+            -LiteralPath $env:SBOM_PATH `
+            -Encoding utf8NoBOM
+
+      - name: Prepare release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseNotesPath = Join-Path $env:RUNNER_TEMP "RELEASE_NOTES.md"
+          Copy-Item -LiteralPath "codex-rs/desktop/RELEASE_NOTES.md" -Destination $releaseNotesPath
+          $checklistUrl = "https://github.com/$env:SOURCE_REPOSITORY/blob/$env:RELEASE_TAG/codex-rs/desktop/RELEASE_CHECKLIST.md"
+          $releaseNotes = (Get-Content -LiteralPath $releaseNotesPath -Raw).Replace(
+            "(RELEASE_CHECKLIST.md)",
+            "($checklistUrl)"
+          )
+          Set-Content -LiteralPath $releaseNotesPath -Value $releaseNotes -Encoding utf8
+          @(
+            "",
+            "## Build identity",
+            "",
+            "- Source repository: $env:SOURCE_REPOSITORY",
+            "- Source tag: $env:RELEASE_TAG",
+            "- Source commit: $env:SOURCE_SHA",
+            "- Workflow run: https://github.com/$env:SOURCE_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "- Provenance verifier repository: $env:SOURCE_REPOSITORY"
+          ) | Add-Content -LiteralPath $releaseNotesPath -Encoding utf8
+          "release_notes_path=$releaseNotesPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Attest signed release subjects
+        id: provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            ${{ steps.installers.outputs.msi_path }}
+            ${{ steps.installers.outputs.nsis_path }}
+            ${{ steps.checksums.outputs.checksum_path }}
+            ${{ runner.temp }}/bridge-codex-installer-sbom.cdx.json
+            ${{ steps.release_notes.outputs.release_notes_path }}
+
+      - name: Verify generated provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MSI_PATH: ${{ steps.installers.outputs.msi_path }}
+          NSIS_PATH: ${{ steps.installers.outputs.nsis_path }}
+          CHECKSUM_PATH: ${{ steps.checksums.outputs.checksum_path }}
+          SBOM_PATH: ${{ runner.temp }}/bridge-codex-installer-sbom.cdx.json
+          RELEASE_NOTES_PATH: ${{ steps.release_notes.outputs.release_notes_path }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          foreach ($subject in @(
+            $env:MSI_PATH,
+            $env:NSIS_PATH,
+            $env:CHECKSUM_PATH,
+            $env:SBOM_PATH,
+            $env:RELEASE_NOTES_PATH
+          )) {
+            gh attestation verify $subject `
+              --repo $env:SOURCE_REPOSITORY `
+              --bundle $env:PROVENANCE_BUNDLE `
+              --signer-workflow "$env:SOURCE_REPOSITORY/.github/workflows/desktop-release.yml" `
+              --source-ref $env:SOURCE_REF `
+              --source-digest $env:SOURCE_SHA `
+              --deny-self-hosted-runners
+          }
+
+      - name: Prepare release metadata
+        id: metadata
+        shell: pwsh
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          RELEASE_NOTES_PATH: ${{ steps.release_notes.outputs.release_notes_path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $provenancePath = Join-Path $env:RUNNER_TEMP "bridge-codex-provenance.jsonl"
+          Copy-Item -LiteralPath $env:PROVENANCE_BUNDLE -Destination $provenancePath
+
+          "provenance_path=$provenancePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "release_notes_path=$env:RELEASE_NOTES_PATH" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create or update private draft release
+        shell: pwsh
+        env:
+          CHECKSUM_PATH: ${{ steps.checksums.outputs.checksum_path }}
+          GH_TOKEN: ${{ secrets.BRIDGE_RELEASE_TOKEN }}
+          MSI_PATH: ${{ steps.installers.outputs.msi_path }}
+          NSIS_PATH: ${{ steps.installers.outputs.nsis_path }}
+          PROVENANCE_PATH: ${{ steps.metadata.outputs.provenance_path }}
+          RELEASE_NOTES_PATH: ${{ steps.metadata.outputs.release_notes_path }}
+          SBOM_PATH: ${{ runner.temp }}/bridge-codex-installer-sbom.cdx.json
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $title = "Bridge Codex $env:RELEASE_TAG"
+          $isPrerelease = $env:RELEASE_TAG.Contains("-rc.")
+
+          $PSNativeCommandUseErrorActionPreference = $false
+          $releaseJson = gh release view $env:RELEASE_TAG `
+            --repo $env:RELEASE_REPOSITORY `
+            --json assets,isDraft `
+            2>$null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($releaseExists) {
+            $release = $releaseJson | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              throw "Refusing to replace assets on an already published release."
+            }
+            $editArgs = @(
+              "release", "edit", $env:RELEASE_TAG,
+              "--repo", $env:RELEASE_REPOSITORY,
+              "--draft=true",
+              "--prerelease=$($isPrerelease.ToString().ToLowerInvariant())",
+              "--title", $title,
+              "--notes-file", $env:RELEASE_NOTES_PATH
+            )
+            gh @editArgs
+          } else {
+            $createArgs = @(
+              "release", "create", $env:RELEASE_TAG,
+              "--repo", $env:RELEASE_REPOSITORY,
+              "--target", $env:RELEASE_REPOSITORY_DEFAULT_BRANCH,
+              "--draft",
+              "--title", $title,
+              "--notes-file", $env:RELEASE_NOTES_PATH
+            )
+            if ($isPrerelease) {
+              $createArgs += "--prerelease"
+            }
+            gh @createArgs
+          }
+
+          if ($releaseExists) {
+            foreach ($asset in $release.assets) {
+              gh release delete-asset $env:RELEASE_TAG $asset.name `
+                --repo $env:RELEASE_REPOSITORY `
+                --yes
+            }
+          }
+
+          $assets = @(
+            $env:MSI_PATH,
+            $env:NSIS_PATH,
+            $env:CHECKSUM_PATH,
+            $env:SBOM_PATH,
+            $env:PROVENANCE_PATH,
+            $env:RELEASE_NOTES_PATH
+          )
+          $uploadArgs = @("release", "upload", $env:RELEASE_TAG) + $assets + @(
+            "--repo", $env:RELEASE_REPOSITORY,
+            "--clobber"
+          )
+          gh @uploadArgs
+
+      - name: Verify downloaded private-release assets and publish RC
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.BRIDGE_RELEASE_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $repository = gh api "repos/$env:RELEASE_REPOSITORY" | ConvertFrom-Json
+          if (-not $repository.private) {
+            throw "Refusing to publish because $env:RELEASE_REPOSITORY is not private."
+          }
+
+          $downloadRoot = Join-Path $env:RUNNER_TEMP "downloaded-release-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $downloadRoot) {
+            throw "Clean release-download directory already exists: $downloadRoot"
+          }
+          New-Item -ItemType Directory -Path $downloadRoot | Out-Null
+          gh release download $env:RELEASE_TAG `
+            --repo $env:RELEASE_REPOSITORY `
+            --dir $downloadRoot
+
+          $files = @(Get-ChildItem -LiteralPath $downloadRoot -File)
+          $msi = @($files | Where-Object { $_.Extension -eq ".msi" })
+          $nsis = @($files | Where-Object { $_.Name.EndsWith("-setup.exe") })
+          $checksumPath = Join-Path $downloadRoot "SHA256SUMS.txt"
+          $sbomPath = Join-Path $downloadRoot "bridge-codex-installer-sbom.cdx.json"
+          $provenancePath = Join-Path $downloadRoot "bridge-codex-provenance.jsonl"
+          $releaseNotesPath = Join-Path $downloadRoot "RELEASE_NOTES.md"
+          if ($files.Count -ne 6 -or $msi.Count -ne 1 -or $nsis.Count -ne 1) {
+            throw "Downloaded release must contain exactly one MSI, one NSIS installer, and four metadata files."
+          }
+          foreach ($path in @($checksumPath, $sbomPath, $provenancePath, $releaseNotesPath)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing downloaded release asset: $(Split-Path $path -Leaf)"
+            }
+          }
+
+          $expectedHashes = @{}
+          $checksumLines = @(Get-Content -LiteralPath $checksumPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($checksumLines.Count -ne 2) {
+            throw "SHA256SUMS.txt must contain exactly two installer checksums."
+          }
+          foreach ($line in $checksumLines) {
+            if ($line -notmatch '^([0-9a-fA-F]{64})  ([^\\/]+)$') {
+              throw "Invalid checksum record: $line"
+            }
+            if ($expectedHashes.ContainsKey($matches[2])) {
+              throw "Duplicate checksum record for $($matches[2])."
+            }
+            $expectedHashes[$matches[2]] = $matches[1].ToLowerInvariant()
+          }
+
+          foreach ($artifact in @($msi[0], $nsis[0])) {
+            if (-not $expectedHashes.ContainsKey($artifact.Name)) {
+              throw "No checksum was published for $($artifact.Name)."
+            }
+            $actualHash = (Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $expectedHashes[$artifact.Name]) {
+              throw "Downloaded checksum verification failed for $($artifact.Name)."
+            }
+
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact.FullName
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Downloaded Authenticode verification failed for $($artifact.Name): $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:SIGNING_CERTIFICATE_THUMBPRINT) {
+              throw "Downloaded installer $($artifact.Name) has an unexpected signing certificate."
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "Downloaded installer $($artifact.Name) has no trusted timestamp."
+            }
+
+          }
+
+          $sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json
+          if ($sbom.bomFormat -ne "CycloneDX" -or [string]::IsNullOrWhiteSpace($sbom.specVersion)) {
+            throw "Downloaded SBOM is not a valid CycloneDX document."
+          }
+          foreach ($artifact in @($msi[0], $nsis[0])) {
+            $expectedHash = $expectedHashes[$artifact.Name]
+            $component = @($sbom.components | Where-Object {
+              $_.type -eq "file" -and
+              $_.name -eq $artifact.Name -and
+              @($_.hashes | Where-Object {
+                $_.alg -eq "SHA-256" -and $_.content -eq $expectedHash
+              }).Count -eq 1
+            })
+            if ($component.Count -ne 1) {
+              throw "Downloaded SBOM does not uniquely inventory $($artifact.Name) at $expectedHash."
+            }
+          }
+          $releaseNotes = Get-Content -LiteralPath $releaseNotesPath -Raw
+          if (-not $releaseNotes.Contains($env:SOURCE_SHA)) {
+            throw "Downloaded release notes do not identify source commit $env:SOURCE_SHA."
+          }
+
+          foreach ($subject in @(
+            $msi[0].FullName,
+            $nsis[0].FullName,
+            $checksumPath,
+            $sbomPath,
+            $releaseNotesPath
+          )) {
+            gh attestation verify $subject `
+              --repo $env:SOURCE_REPOSITORY `
+              --bundle $provenancePath `
+              --signer-workflow "$env:SOURCE_REPOSITORY/.github/workflows/desktop-release.yml" `
+              --source-ref $env:SOURCE_REF `
+              --source-digest $env:SOURCE_SHA `
+              --deny-self-hosted-runners
+          }
+
+          $isPrerelease = $env:RELEASE_TAG.Contains("-rc.").ToString().ToLowerInvariant()
+          gh release edit $env:RELEASE_TAG `
+            --repo $env:RELEASE_REPOSITORY `
+            --draft=false `
+            --prerelease=$isPrerelease

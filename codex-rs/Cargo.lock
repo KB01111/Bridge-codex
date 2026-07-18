@@ -2219,6 +2219,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "codex-agent-extension",
  "codex-analytics",
  "codex-app-server-protocol",
  "codex-app-server-transport",
@@ -2259,6 +2260,7 @@ dependencies = [
  "codex-rollout",
  "codex-sandboxing",
  "codex-shell-command",
+ "codex-skills",
  "codex-skills-extension",
  "codex-state",
  "codex-thread-store",
@@ -2876,6 +2878,7 @@ dependencies = [
  "codex-utils-path-uri",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3068,6 +3071,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
@@ -3118,18 +3122,26 @@ dependencies = [
 
 [[package]]
 name = "codex-desktop"
-version = "0.0.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
  "chromiumoxide",
  "chrono",
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "codex-arg0",
  "codex-code-memory",
- "dirs",
+ "codex-config",
+ "codex-core",
+ "codex-feedback",
+ "codex-keyring-store",
+ "codex-models-manager",
+ "codex-protocol",
  "enigo",
- "eventsource-stream",
  "futures",
+ "keyring",
  "pretty_assertions",
  "reqwest 0.12.28",
  "serde",
@@ -3138,13 +3150,16 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tokio",
+ "toml 0.9.11+spec-1.1.0",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "tree-sitter",
  "url",
  "uuid",
- "which 8.0.0",
+ "windows-sys 0.52.0",
  "wiremock",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -3317,9 +3332,17 @@ name = "codex-external-agent-migration"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "codex-analytics",
  "codex-app-server-protocol",
+ "codex-config",
+ "codex-core",
+ "codex-core-plugins",
  "codex-hooks",
+ "codex-memories-write",
+ "codex-otel",
+ "codex-plugin",
  "codex-protocol",
+ "codex-rollout",
  "codex-utils-output-truncation",
  "pretty_assertions",
  "serde",
@@ -3327,7 +3350,9 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "toml 0.9.11+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -3665,6 +3690,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-plugins",
  "futures",
+ "lru 0.16.3",
  "pretty_assertions",
  "regex-lite",
  "rmcp",
@@ -4127,6 +4153,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "codex-extension-items",
  "codex-file-search",
  "codex-git-utils",
  "codex-otel",

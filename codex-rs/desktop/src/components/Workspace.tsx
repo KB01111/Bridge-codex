@@ -1,13 +1,12 @@
 import * as Tabs from "@radix-ui/react-tabs";
 
-import type { BrowserFrame, BrowserStatus, DesktopStatus } from "../types";
+import type { BrowserStatus, DesktopStatus } from "../types";
 import { BrowserWorkspace } from "./BrowserWorkspace";
 import { DesktopWorkspace } from "./DesktopWorkspace";
 
 export type WorkspaceProps = {
   activeTab: "browser" | "desktop";
   browserStatus: BrowserStatus | null;
-  browserFrame: BrowserFrame | null;
   desktopStatus: DesktopStatus | null;
   browserBusy: boolean;
   desktopBusy: boolean;
@@ -49,7 +48,6 @@ export function Workspace(props: WorkspaceProps) {
         <Tabs.Content value="browser">
           <BrowserWorkspace
             status={props.browserStatus}
-            frame={props.browserFrame}
             busy={props.browserBusy}
             error={props.browserError}
             onStart={props.onStartBrowser}
