@@ -11,16 +11,6 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_CODE_BLOCK_BYTES: usize = 32 * 1024;
 const MAX_CODE_BLOCKS: usize = 8;
 
-pub const SANDBOX_EXECUTION_SYSTEM_PROMPT: &str = r#"When a response contains executable code, obey this sandbox contract:
-- Put every complete program in a clean fenced Markdown code block with an explicit language tag: c, cpp, rust, go, swift, javascript, typescript, tsx, or python.
-- C, C++, Rust, Go, and Swift code must use portable standard-language facilities and be compatible with the wasm32-wasip2 target. Do not use OS-specific APIs, FFI, native extensions, subprocesses, or external system libraries.
-- JavaScript, TypeScript, and Python code must use only standard, pure-language facilities. Do not require packages with native C extensions.
-- The runtime is offline. Do not make network requests or use fetch, sockets, HTTP clients, WebSockets, or remote imports.
-- The only filesystem root is /sandbox/. Use relative paths within the sandbox or absolute paths beginning with /sandbox/. Never access parent directories or host paths.
-- The program must write its verifiable result to stdout with the language's normal print facility.
-- After the code fence, include a short line beginning with `Expected stdout:` that describes the expected console output.
-Do not place executable code outside a fenced block."#;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SandboxLanguage {
     C,
@@ -140,18 +130,6 @@ pub struct CodeValidation {
     pub issues: Vec<ValidationIssue>,
 }
 
-impl CodeValidation {
-    pub fn failure_summary(&self) -> String {
-        self.issues
-            .iter()
-            .filter(|issue| issue.severity == ValidationSeverity::Error)
-            .take(3)
-            .map(|issue| issue.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodePolicyStatus {
@@ -162,13 +140,6 @@ pub struct CodePolicyStatus {
     network_access: String,
     sandbox_root: String,
     response_contract: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SandboxValidationEvent {
-    pub request_id: String,
-    pub validation: CodeValidation,
 }
 
 struct FencedBlock {

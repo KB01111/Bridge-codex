@@ -1,6 +1,6 @@
 [package]
 name = "codex-desktop"
-version.workspace = true
+version = "1.0.0-rc.1"
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
@@ -26,10 +26,17 @@ axum = { workspace = true, features = ["http1", "json", "tokio"] }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 chromiumoxide = { workspace = true }
+codex-app-server-client = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+codex-arg0 = { workspace = true }
 codex-code-memory = { workspace = true }
-dirs = { workspace = true }
+codex-config = { workspace = true }
+codex-core = { workspace = true }
+codex-feedback = { workspace = true }
+codex-keyring-store = { workspace = true }
+codex-models-manager = { workspace = true }
+codex-protocol = { workspace = true }
 enigo = { workspace = true }
-eventsource-stream = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 serde = { workspace = true, features = ["derive"] }
@@ -38,18 +45,26 @@ tauri = { workspace = true }
 tokio = { workspace = true, features = [
     "macros",
     "net",
-    "process",
     "rt-multi-thread",
     "sync",
     "time",
 ] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 tree-sitter = { workspace = true }
+toml = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-which = { workspace = true }
+zip = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
+keyring = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }

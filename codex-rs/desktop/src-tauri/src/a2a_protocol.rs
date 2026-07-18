@@ -6,7 +6,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde::Serialize;
 
-const A2A_BASE_URL: &str = "http://127.0.0.1:8120/a2a";
+pub(super) const DEFAULT_A2A_PORT: u16 = 8120;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,7 +56,7 @@ struct AgentSkill {
     output_modes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 pub enum TaskState {
     #[serde(rename = "TASK_STATE_WORKING")]
     Working,
@@ -68,7 +68,7 @@ pub enum TaskState {
     Canceled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct A2aTask {
     pub id: String,
@@ -77,7 +77,7 @@ pub struct A2aTask {
     pub artifacts: Vec<Artifact>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStatus {
     pub state: TaskState,
@@ -106,7 +106,7 @@ pub struct TextPart {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Artifact {
     pub artifact_id: String,
@@ -137,9 +137,38 @@ pub(super) struct DelegateTaskRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct A2aServerStatus {
+    pub enabled: bool,
     pub running: bool,
     pub address: String,
+    pub token_configured: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aServerSettings {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for A2aServerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: DEFAULT_A2A_PORT,
+        }
+    }
+}
+
+/// Contains a newly provisioned bearer token exactly once.
+///
+/// This type deliberately does not implement `Debug`, which reduces the risk
+/// of accidentally recording its secret in structured logs.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTokenProvisioning {
+    pub token: String,
+    pub status: A2aServerStatus,
 }
 
 pub(super) struct A2aJson<T>(pub(super) T);
@@ -158,12 +187,12 @@ where
     }
 }
 
-pub(super) async fn agent_card() -> Json<AgentCard> {
+pub(super) fn agent_card(port: u16) -> Json<AgentCard> {
     Json(AgentCard {
         name: "Bridge Codex Work Mode".to_string(),
         description: "Local multi-model coding and browser automation agent".to_string(),
         supported_interfaces: vec![AgentInterface {
-            url: A2A_BASE_URL.to_string(),
+            url: format!("http://127.0.0.1:{port}/a2a"),
             protocol_binding: "HTTP+JSON".to_string(),
             protocol_version: "1.0".to_string(),
         }],

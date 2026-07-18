@@ -16,17 +16,11 @@ fn configure_bazel_windres() -> Result<(), Box<dyn std::error::Error>> {
     })?);
     let shadow_project = out_dir.join("tauri-project");
     std::fs::create_dir_all(&shadow_project)?;
+    let package_version = std::env::var("CARGO_PKG_VERSION")?;
     std::fs::write(
         shadow_project.join("Cargo.toml"),
-        concat!(
-            "[package]\n",
-            "name = \"codex-desktop\"\n",
-            "version = \"0.0.0\"\n",
-            "edition = \"2024\"\n",
-            "\n",
-            "[[bin]]\n",
-            "name = \"codex-desktop\"\n",
-            "path = \"src/main.rs\"\n",
+        format!(
+            "[package]\nname = \"codex-desktop\"\nversion = \"{package_version}\"\nedition = \"2024\"\n\n[[bin]]\nname = \"codex-desktop\"\npath = \"src/main.rs\"\n"
         ),
     )?;
     for relative_path in [
