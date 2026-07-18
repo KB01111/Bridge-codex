@@ -1,17 +1,33 @@
 # Security Policy
 
-Thank you for helping us keep Codex secure!
+Thank you for helping us keep Bridge Codex secure.
 
 ## Reporting Security Issues
 
-The security is essential to OpenAI's mission. We appreciate the work of security researchers acting in good faith to identify and responsibly report potential vulnerabilities, helping us maintain strong privacy and security standards for our users and technology.
+Bridge Codex is maintained by KB Helios as a downstream Codex-based project.
+Please do not send Bridge Codex vulnerabilities to OpenAI's Bugcrowd program.
 
-Our security program is managed through Bugcrowd, and we ask that any validated vulnerabilities be reported via the [Bugcrowd program](https://bugcrowd.com/engagements/openai).
+Report a vulnerability privately through the repository's
+[security advisory form](https://github.com/KB01111/Bridge-codex/security/advisories/new).
+Include the affected version, reproduction steps, impact, and any suggested
+mitigation. Do not open a public issue for an undisclosed vulnerability.
 
-## Vulnerability Disclosure Program
+## Response expectations
 
-Our Vulnerability Program Guidelines are defined on our [Bugcrowd program page](https://bugcrowd.com/engagements/openai).
+Maintainers will acknowledge a complete report as soon as practical, coordinate
+validation and remediation privately, and credit reporters who request it.
+Bridge Codex does not currently operate a paid bug-bounty program.
 
-## How to operate CODEX safely
+## Supported versions
 
-For details on Codex security boundaries, including sandboxing, approvals, and network controls, see [Agent approvals & security](https://developers.openai.com/codex/agent-approvals-security).
+Bridge Codex is in a private release-candidate phase. Only the latest signed
+candidate under active pilot is eligible for security fixes; superseded
+candidates and development previews are unsupported. No public-GA support
+commitment is made by `1.0.0-rc.1`.
+
+## Operating Bridge Codex safely
+
+Keep CLIProxyAPI bound to loopback with API-key authentication, review agent
+approval requests, and leave experimental desktop control disabled when it is
+not actively needed. Upstream Codex security guidance remains useful for the
+embedded agent runtime: [Agent approvals & security](https://developers.openai.com/codex/agent-approvals-security).

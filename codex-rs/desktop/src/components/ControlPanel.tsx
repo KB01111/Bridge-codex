@@ -1,5 +1,7 @@
 import * as Tabs from "@radix-ui/react-tabs";
+import type { Dispatch } from "react";
 
+import type { BridgeAgentRuntimeStatus } from "../agentRuntime";
 import type {
   A2aStatus,
   A2aTask,
@@ -11,7 +13,10 @@ import type {
   ProxyModel,
   ProxyStatus,
 } from "../types";
-import type { LoginState, LoginVerificationState } from "../useBridgeState";
+import type {
+  LocalDataAction,
+  LocalDataState,
+} from "../localDataReducer";
 import { MemoryPanel } from "./MemoryPanel";
 import { RoutingPanel } from "./RoutingPanel";
 import { TasksPanel } from "./TasksPanel";
@@ -29,8 +34,7 @@ export type ControlPanelProps = {
   codeMemoryWarnings: string[];
   models: ProxyModel[];
   selectedModel: string;
-  loginState: LoginState;
-  loginVerification: LoginVerificationState;
+  runtimeStatus: BridgeAgentRuntimeStatus | null;
   routingBusy: boolean;
   a2aBusy: boolean;
   codeMemoryBusy: boolean;
@@ -40,19 +44,28 @@ export type ControlPanelProps = {
   onRefreshAll: () => Promise<void>;
   onSelectModel: (model: string) => void;
   onRefreshModels: () => Promise<void>;
-  onEnsureProxy: () => Promise<void>;
-  onLaunchLogin: () => Promise<void>;
-  onVerifyLogin: () => Promise<void>;
-  onResetLogin: () => void;
+  onConfigureProxy: (baseUrl: string, apiKey: string) => Promise<void>;
   onRefreshA2aTasks: () => Promise<void>;
   onSelectA2aTask: (id: string | null) => void;
   onDelegateA2aTask: (request: DelegateA2aTaskRequest) => Promise<void>;
   onCancelA2aTask: (id: string) => Promise<void>;
+  onConfigureA2aServer: (enabled: boolean, port: number) => Promise<unknown>;
+  onProvisionA2aToken: (regenerate: boolean) => Promise<string | null>;
+  onDeleteA2aToken: () => Promise<unknown>;
   onRefreshCodeMemory: () => Promise<void>;
   onIndexCodeMemory: (root: string) => Promise<void>;
   onSearchCodeMemory: (request: CodeMemorySearchRequest) => Promise<void>;
   onClearCodeMemory: () => Promise<void>;
   onClearCodeMemoryResults: () => void;
+  localDataState: LocalDataState;
+  dispatchLocalData: Dispatch<LocalDataAction>;
+  conversationCount: number;
+  currentMessageCount: number;
+  localDataBusy: boolean;
+  onExportSession: () => void;
+  onArchiveCurrent: () => void;
+  onDeleteAllLocalData: () => Promise<boolean>;
+  onExportSupportBundle: () => Promise<string>;
   onActiveTabChange: (value: "routing" | "tasks" | "memory") => void;
 };
 
@@ -113,16 +126,21 @@ export function ControlPanel(props: ControlPanelProps) {
             codePolicyStatus={props.codePolicyStatus}
             models={props.models}
             selectedModel={props.selectedModel}
-            loginState={props.loginState}
-            loginVerification={props.loginVerification}
+            runtimeStatus={props.runtimeStatus}
             busy={props.routingBusy}
             error={props.routingError}
             onSelectModel={props.onSelectModel}
             onRefreshModels={props.onRefreshModels}
-            onEnsureProxy={props.onEnsureProxy}
-            onLaunchLogin={props.onLaunchLogin}
-            onVerifyLogin={props.onVerifyLogin}
-            onResetLogin={props.onResetLogin}
+            onConfigureProxy={props.onConfigureProxy}
+            localDataState={props.localDataState}
+            dispatchLocalData={props.dispatchLocalData}
+            conversationCount={props.conversationCount}
+            currentMessageCount={props.currentMessageCount}
+            localDataBusy={props.localDataBusy}
+            onExportSession={props.onExportSession}
+            onArchiveCurrent={props.onArchiveCurrent}
+            onDeleteAllLocalData={props.onDeleteAllLocalData}
+            onExportSupportBundle={props.onExportSupportBundle}
           />
         </Tabs.Content>
 
@@ -139,6 +157,9 @@ export function ControlPanel(props: ControlPanelProps) {
             onSelectTask={props.onSelectA2aTask}
             onDelegate={props.onDelegateA2aTask}
             onCancel={props.onCancelA2aTask}
+            onConfigureServer={props.onConfigureA2aServer}
+            onProvisionToken={props.onProvisionA2aToken}
+            onDeleteToken={props.onDeleteA2aToken}
           />
         </Tabs.Content>
 
